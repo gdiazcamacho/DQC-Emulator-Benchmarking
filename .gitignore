@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pdb
+*.egg-info/
+.ipynb_checkpoints/
+
+# Local development
+create_folder_structure.sh
+test_*.py
+*_local.ipynb
+job_*
+notebooks/local_tests/
+scratch/
+tmp/
+logs/
+*.log
+tree*
+*.sh
+*.err
+*.out
+*.yaml
+
+# Data (keep only small examples)
+data/
+results/
+*.csv
+*.json
+*.npy
+
+# OS / editor noise
+.DS_Store
+*.swp
+
