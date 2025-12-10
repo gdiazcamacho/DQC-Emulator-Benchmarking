@@ -32,3 +32,10 @@ data/
 .DS_Store
 *.swp
 
+# Explicitly keep these folders
+!configs/
+!configs/.gitkeep
+!scripts/
+!scripts/.gitkeep
+
+
