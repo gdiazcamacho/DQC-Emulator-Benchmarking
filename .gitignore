@@ -24,7 +24,6 @@ tree*
 
 # Data (keep only small examples)
 data/
-results/
 *.csv
 *.json
 *.npy
