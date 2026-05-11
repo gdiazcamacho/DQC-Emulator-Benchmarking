@@ -1,4 +1,4 @@
-# Python
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc
 *.pyo
@@ -6,36 +6,49 @@ __pycache__/
 *.egg-info/
 .ipynb_checkpoints/
 
-# Local development
-create_folder_structure.sh
-test_*.py
-*_local.ipynb
-job_*
-notebooks/local_tests/
+# ── Conda / virtual environments ──────────────────────────────────────────────
+.conda/
+.venv/
+
+# ── SLURM: generated job scripts and their output logs ────────────────────────
+# job_creator.py writes these; they are reproducible from sweep_params.yaml.
+emulators/*/jobs/*.sh
+emulators/*/jobs/*.out
+emulators/*/jobs/*.err
+# SquidASM also writes timestamp-named network configs into jobs/ at runtime
+emulators/squidasm/jobs/*-config.yaml
+# Stray swap files
+emulators/*/jobs/*.swp
+
+# ── Results (large data; not committed) ───────────────────────────────────────
+emulators/*/results/*.csv
+emulators/*/results/*.json
+emulators/*/results/*.npy
+
+# ── SquidASM runtime artefact ─────────────────────────────────────────────────
+# The live network config is auto-generated from config_template.yaml at runtime.
+emulators/squidasm/scripts/.config_file.yaml
+
+# ── Scratch / local-only ──────────────────────────────────────────────────────
 scratch/
 tmp/
-logs/
 *.log
-tree*
-*.sh
-*.err
-*.out
-*.yaml
+tree.py
+tree_folders.py
+create_folder_structure.sh
+*_local.ipynb
+test_*.py
+sweep_params_old.yaml
 
-# Data (keep only small examples)
-data/
-*.csv
-*.json
-*.npy
-
-# OS / editor noise
+# ── OS / editor noise ─────────────────────────────────────────────────────────
 .DS_Store
 *.swp
+*.swo
+.idea/
+.vscode/
 
-# Explicitly keep these folders
-!configs/
+# ── Keep these placeholder directories ────────────────────────────────────────
 !configs/.gitkeep
-!scripts/
 !scripts/.gitkeep
-
-
+!emulators/*/jobs/.gitkeep
+!emulators/*/results/.gitkeep
