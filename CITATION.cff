@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+
+authors:
+  - family-names: "Díaz Camacho"
+    given-names: "Guillermo"
+    orcid: "https://orcid.org/0009-0007-5839-6617"
+
+title: "DQC Emulator Benchmarking"
+version: 1.0.0
+url: "https://github.com/gdiazcamacho/DQC-Emulator-Benchmarking"
+
+preferred-citation:
+  type: software
+  title: "DQC Emulator Benchmarking"
+
+  authors:
+    - family-names: "Díaz Camacho"
+      given-names: "Guillermo"
+      orcid: "https://orcid.org/0009-0007-5839-6617"
+
+  year: "2026"
+  url: "https://github.com/gdiazcamacho/DQC-Emulator-Benchmarking"

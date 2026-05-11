@@ -278,7 +278,7 @@ def run_DQFT(
         shots=1,
         config_template="config_template.yaml",
         verbose=False,
-        delete_temp_file=False,
+        delete_temp_file=True,
     ):
 
     network_structure = {node: nq for node, nq in zip(node_names, node_qubits)}

@@ -38,5 +38,5 @@ def create_jobs(config_path):
     print(f"Total jobs created: {job_count}")
 
 if __name__ == "__main__":
-    create_jobs('config/sweep_params.yaml')
+    create_jobs('configs/sweep_params.yaml')
 

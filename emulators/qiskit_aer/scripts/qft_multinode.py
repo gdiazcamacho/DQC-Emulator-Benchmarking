@@ -139,7 +139,7 @@ def distribute_qubits(num_qubits: int, num_nodes: int):
         
 def recursive_qft(n,theta, partitions, swap_qubits=True, min_rotation=0, verbose=False):
     data_qubits = [q for q in range(n)]
-    indices =  partition_list(all_qubits, distribute_qubits(n,partitions))[::-1]
+    indices =  partition_list(data_qubits, distribute_qubits(n,partitions))[::-1]
 
     # Create nodes for all qubits
     registers = create_alphabetical_registers([len(node) for node in indices])
