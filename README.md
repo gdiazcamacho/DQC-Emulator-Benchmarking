@@ -39,8 +39,8 @@ DQC-Emulator-Benchmarking/
 │   │   ├── scripts/
 │   │   │   └── qft_multinode.py       # Distributed inverse QFT implementation
 │   │   ├── slurm_template_multinode.sh
-│   │   ├── jobs/                      # Auto-generated SLURM scripts (git-ignored)
-│   │   └── results/                   # CSV output files (git-ignored)
+│   │   ├── jobs/                      # Auto-generated SLURM scripts
+│   │   └── results/                   # CSV output files 
 │   │
 │   ├── squidasm/
 │   │   ├── env/environment.yml
@@ -50,11 +50,7 @@ DQC-Emulator-Benchmarking/
 │   │   │   ├── config-QFT-noiseless.yaml
 │   │   │   ├── config-QFT-noisy.yaml
 │   │   │   ├── qft_multinode.py       # Multi-node distributed QFT
-│   │   │   ├── qft_two_node.py        # Two-node specialization
-│   │   │   └── qft_single_node.py     # Single-node reference
 │   │   ├── slurm_template_multinode.sh
-│   │   ├── slurm_template_two_node.sh
-│   │   ├── slurm_template_single_node.sh
 │   │   ├── jobs/
 │   │   └── results/
 │   │
@@ -70,7 +66,7 @@ DQC-Emulator-Benchmarking/
 │       ├── env/environment.yml
 │       ├── scripts/
 │       │   └── qft_multinode.py
-│       ├── slurm_template.sh
+│       ├── slurm_template_multinode.sh
 │       ├── jobs/
 │       └── results/
 │
@@ -81,8 +77,6 @@ DQC-Emulator-Benchmarking/
 │
 └── plots/
     ├── plot_results.py                # Parses CSVs and generates figures
-    ├── scaling_2panel.png
-    └── scaling_2panel.svg
 ```
 
 ---
