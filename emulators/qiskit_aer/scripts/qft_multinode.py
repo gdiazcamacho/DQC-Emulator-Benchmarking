@@ -1,16 +1,26 @@
 
 import numpy as np
 from qiskit import QuantumCircuit, transpile, QuantumRegister, ClassicalRegister
-from qiskit_ibm_runtime import QiskitRuntimeService
 from qiskit_aer.noise import NoiseModel, depolarizing_error
 from qiskit_aer import AerSimulator
 from qiskit.result import marginal_counts
 import string
 import argparse
-import csv
 
 import time
 import tracemalloc
+
+# --- shared helpers -----------------------------------------------------------
+# Anchor on this file's location so the script runs identically from the repo
+# root, from this directory, or from a SLURM working directory.
+import os as _os, sys as _sys
+_REPO_ROOT = _os.path.abspath(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", ".."))
+if _REPO_ROOT not in _sys.path:
+    _sys.path.insert(0, _REPO_ROOT)
+from common.dqc_common import (
+    distribute_qubits, partition_list, fidelity_from_counts, write_result_row,
+)
+# ------------------------------------------------------------------------------
 ################################################################################
 
 
@@ -84,59 +94,6 @@ def classical_reverse(counts):
         reversed_counts[k[::-1]]=v
     return reversed_counts
 
-def partition_list(lst, partition_spec):
-    """
-    Splits a list into partitions based on a partition specification.
-
-    Args:
-        lst (list): The input list to split.
-        partition_spec (int or list of int): Either the number of equal partitions,
-            or a list specifying the size of each partition.
-
-    Returns:
-        list of lists: A list containing sublists for each partition.
-
-    Raises:
-        ValueError: If the partitioning cannot be performed.
-    """
-    if isinstance(partition_spec, int):
-        # Old behavior: number of equal partitions
-        num_partitions = partition_spec
-        if len(lst) % num_partitions != 0:
-            raise ValueError("List length is not evenly divisible by the number of partitions.")
-        partition_size = len(lst) // num_partitions
-        return [lst[i * partition_size : (i + 1) * partition_size] for i in range(num_partitions)]
-
-    elif isinstance(partition_spec, list):
-        if sum(partition_spec) != len(lst):
-            raise ValueError("Sum of partition sizes does not match list length.")
-
-        result = []
-        idx = 0
-        for size in partition_spec:
-            result.append(lst[idx : idx + size])
-            idx += size
-        return result
-
-    else:
-        raise TypeError("partition_spec must be an int or a list of ints.")
-
-def distribute_qubits(num_qubits: int, num_nodes: int):
-    """Distribute qubits across nodes, assigning the remainder to the last node."""
-    base = (num_qubits + num_nodes - 1) // num_nodes  # ceiling division
-    qubits = [base] * num_nodes
-    total = sum(qubits)
-    over = total - num_qubits
-
-    # Remove 1 from the last 'over' nodes (starting from the end)
-    for i in range(over):
-        qubits[-(i + 1)] -= 1
-        
-    if any(q <= 1 for q in qubits):
-        print("Warning: One or more nodes have ≤ 1 qubit.")
-        
-    return qubits
-        
 def recursive_qft(n,theta, partitions, swap_qubits=True, min_rotation=0, verbose=False):
     data_qubits = [q for q in range(n)]
     indices =  partition_list(data_qubits, distribute_qubits(n,partitions))[::-1]
@@ -160,7 +117,9 @@ def recursive_qft(n,theta, partitions, swap_qubits=True, min_rotation=0, verbose
         circ.compose(myqft_inverse(len(control_node), swap_qubits=False), 
                    control_node, inplace=True)
 
-        target_nodes = [n for n in registers[::-1][i+1:]]
+        # NB: do not bind the loop variable to `n` here -- `n` is the qubit count
+        # parameter of this function and was previously shadowed by a register.
+        target_nodes = [nd for nd in registers[::-1][i+1:]]
         # If target qubits is empty (i.e. this is the last register), don't do the z_block
         if target_nodes:
             for j,target_node in enumerate(target_nodes):
@@ -184,7 +143,12 @@ def recursive_qft(n,theta, partitions, swap_qubits=True, min_rotation=0, verbose
                                 print('Target',target)
                             if abs(angles[k]) >= min_rotation:
                                 # Only apply gates larger than the min_rotation
-                                circ.crz(angles[k], control, target)
+                                # `cp`, not `crz`: the inverse QFT is built from
+                                # controlled-PHASE gates. See common/dqc_common.py
+                                # and tests/test_primitives.py for the identity
+                                # crz(t) = cp(t) . P_control(-t/2), and note that
+                                # myqft_inverse() above already uses cp.
+                                circ.cp(angles[k], control, target)
 
                     circ.barrier()
                 circ.barrier()
@@ -224,7 +188,8 @@ def recursive_qft_telegate(n,theta, num_nodes,swap_qubits=True, min_rotation=0, 
         circ.compose(myqft_inverse(len(control_node[0:-1]), swap_qubits=False), 
                    control_node[0:-1], inplace=True)
 
-        target_nodes = [n for n in registers[::-1][i+1:]]
+        # NB: do not bind the loop variable to `n` (see recursive_qft).
+        target_nodes = [nd for nd in registers[::-1][i+1:]]
         # If target qubits is empty (i.e. this is the last register), don't do the z_block
         if target_nodes:
             for j,target_node in enumerate(target_nodes):
@@ -246,7 +211,7 @@ def recursive_qft_telegate(n,theta, num_nodes,swap_qubits=True, min_rotation=0, 
                     # If all the angles are smaller than the min_rotation, don't do anything 
                     if any(abs(angles) >= min_rotation):
 
-                        # The whole column of crz gates share the same control: only one EPR
+                        # The whole column of cp gates shares the same control: only one EPR
                         # Adds a register for the EPR
                         # We could add a classical register too, but for now reuse some clbits
 
@@ -262,7 +227,9 @@ def recursive_qft_telegate(n,theta, num_nodes,swap_qubits=True, min_rotation=0, 
                                 print('Target',target)
                             if abs(angles[k]) >= min_rotation:
                                 # Only apply gates larger than the min_rotation
-                                circ.crz(angles[k], EPR_qubits[1], target)
+                                # `cp`, not `crz` -- matches myqft_inverse() and the
+                                # SquidASM implementation (AbstractNode.CP).
+                                circ.cp(angles[k], EPR_qubits[1], target)
 
                         cat_disentangle(circ, control, EPR_qubits, circ.clbits[0])    
 
@@ -356,16 +323,16 @@ if __name__ == "__main__":
     print(f"Peak Memory Usage: {peak / 1024} KB")
     print(f"Result: {phases}")
     
-    # Define the CSV file path
-    csv_file_path = f"../results/{emulator}_{num_nodes}_q{num_qubits}_a{theta}.csv"
-    
-    # Write the results to a CSV file
-    with open(csv_file_path, mode='w', newline='') as file:
-        writer = csv.writer(file)
-        # Write the header
-        writer.writerow(["Emulator", "Nodes", "Num Qubits", "Theta", "Shots",
-                         "Execution Time (s)", "Current Memory (KB)", "Peak Memory (KB)", "Result"])
-        # Write the data
-        writer.writerow([emulator, num_nodes, num_qubits, theta, shots,
-                         execution_time, current / 1024, peak / 1024, phases])
+    # Fidelity against the ideal inverse-QFT distribution, computed here where
+    # the raw counts exist rather than reconstructed later from the CSV.
+    fidelity = fidelity_from_counts(phases, num_qubits, theta)
+    print(f"Fidelity: {fidelity}")
+
+    csv_file_path = write_result_row(
+        emulator=emulator, num_nodes=num_nodes, num_qubits=num_qubits,
+        theta=theta, shots=shots, execution_time=execution_time,
+        current_kb=current / 1024, peak_kb=peak / 1024,
+        result=phases, algorithm="qft", fidelity=fidelity,
+    )
+    print(f"Wrote {csv_file_path}")
     

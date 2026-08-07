@@ -1,7 +1,6 @@
 import logging
 import numpy as np
 import argparse
-import csv
 
 from netqasm.sdk import Qubit
 from typing import List
@@ -14,11 +13,23 @@ import os
 import time
 import tracemalloc
 
+# --- shared helpers -----------------------------------------------------------
+# Anchor on this file's location so the script runs identically from the repo
+# root, from this directory, or from a SLURM working directory.
+import os as _os, sys as _sys
+_REPO_ROOT = _os.path.abspath(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", ".."))
+if _REPO_ROOT not in _sys.path:
+    _sys.path.insert(0, _REPO_ROOT)
+from common.dqc_common import (
+    distribute_qubits, fidelity_from_counts, write_result_row,
+)
+# ------------------------------------------------------------------------------
+
 from squidasm.run.stack.run import run
 from squidasm.sim.stack.program import ProgramContext
 from squidasm.run.stack.config import StackNetworkConfig
 # from squidasm.run.stack.common import AllocError
-from AbstractNode import AbstractNode, CRz
+from AbstractNode import AbstractNode, CP
 from copy import deepcopy
 import yaml
 
@@ -76,22 +87,6 @@ def setup_network_yaml(
         except yaml.YAMLError as exc:
             print(exc)
     return StackNetworkConfig.from_file(temp_config_file)
-
-def distribute_qubits(num_qubits: int, num_nodes: int):
-    """Distribute qubits across nodes, assigning the remainder to the last node."""
-    base = (num_qubits + num_nodes - 1) // num_nodes  # ceiling division
-    qubits = [base] * num_nodes
-    total = sum(qubits)
-    over = total - num_qubits
-
-    # Remove 1 from the last 'over' nodes (starting from the end)
-    for i in range(over):
-        qubits[-(i + 1)] -= 1
-        
-    if any(q <= 1 for q in qubits):
-        print("Warning: One or more nodes have ≤ 1 qubit.")
-        
-    return qubits
 
 def node_distance(node1, node2, network_structure):
     return max( 
@@ -154,7 +149,7 @@ class QFTNode(AbstractNode):
                 print(f"{self.name}: (F) Rz({theta*np.pi*2**(i+1+start_from)}, {i})")
 
     def controlled_phase_gradient_source(self, qubits: List[Qubit], peer: str, verbose: bool = False):
-        """Send control to peer's qubits using CAT entanglement and apply CRz from source side."""
+        """Send control to peer's qubits using CAT entanglement and apply CP from source side."""
         csocket = self.context.csockets[peer]
         
         # Send how many control qubits I have
@@ -165,7 +160,7 @@ class QFTNode(AbstractNode):
         yield from self.connection.flush()
         if self.verbose:
             print("\n")
-        # For each control qubit, entangle and apply remote CRz via CAT
+        # For each control qubit, entangle and apply remote CP via CAT
         for q in qubits:
             yield from self.cat_entangle_source(q, peer)
             if self.verbose:
@@ -175,7 +170,7 @@ class QFTNode(AbstractNode):
                 print(f"{self.name}:cat disentangle to {peer}")
 
     def controlled_phase_gradient_target(self, qubits: List[Qubit], peer: str, verbose: bool = False):
-        """Receive control from peer's qubits and apply CRz locally."""
+        """Receive control from peer's qubits and apply CP locally."""
         csocket = self.context.csockets[peer]
         if self.verbose:
             print(f"{self.name}: waiting for num_peer_qubits from {peer}")
@@ -191,9 +186,9 @@ class QFTNode(AbstractNode):
                 distance = node_distance(self.name, peer, self.network_structure)
 
                 angle = -np.pi / (2 ** (i + num_own_qubits - j + distance))
-                CRz(epr, q, angle=angle)
+                CP(epr, q, angle=angle)
                 if self.verbose:
-                    print(f"{self.name}: (PG) CRz({i}, {j}) = -p/{2**(i + num_own_qubits - j + distance)}")
+                    print(f"{self.name}: (PG) CP({i}, {j}) = -p/{2**(i + num_own_qubits - j + distance)}")
             yield from self.cat_disentangle_target(epr, peer)
 
     def run(self, context: ProgramContext):
@@ -372,22 +367,19 @@ if __name__ == "__main__":
     bitstrings = ["".join(map(str, row)) for row in combined]
     # Convert to float values (rescaled binary to [0,1))
     num_qubits = combined.shape[1]
-    float_values = [int(bits, 2) / (2 ** num_qubits) for bits in bitstrings]
+    float_values = [int(bits, 2) / (2 ** total_qubits) for bits in bitstrings]
     # Count frequencies
     counts = dict(Counter(float_values))
     sorted_counts = dict(sorted(counts.items()))
     print(f"Phases Counts: {sorted_counts}")
     
-    # Define the CSV file path
-    csv_file_path = f"../results/{emulator}_{num_nodes}_q{num_qubits}_a{theta}.csv"
-    
-    # Write the results to a CSV file
-    with open(csv_file_path, mode='w', newline='') as file:
-      writer = csv.writer(file)
-      # Write the header
-      writer.writerow(["Emulator", "Nodes", "Num Qubits", "Theta", "Shots",
-                       "Execution Time (s)", "Current Memory (KB)", "Peak Memory (KB)", "Result"])
-      # Write the data
-      writer.writerow([emulator, num_nodes, num_qubits, theta, shots,
-                       execution_time, current / 1024, peak / 1024, sorted_counts])
+    fidelity = fidelity_from_counts(sorted_counts, num_qubits, theta)
+    print(f"Fidelity: {fidelity}")
 
+    csv_file_path = write_result_row(
+        emulator=emulator, num_nodes=num_nodes, num_qubits=num_qubits,
+        theta=theta, shots=shots, execution_time=execution_time,
+        current_kb=current / 1024, peak_kb=peak / 1024,
+        result=sorted_counts, algorithm="qft", fidelity=fidelity,
+    )
+    print(f"Wrote {csv_file_path}")
