@@ -30,6 +30,10 @@ Each emulator runs in its own isolated conda environment to avoid dependency con
 ```
 DQC-Emulator-Benchmarking/
 │
+├── common/
+│   └── dqc_common.py                  # Shared partitioning, fidelity and CSV helpers
+│                                      # (imported by all four emulator scripts)
+│
 ├── configs/
 │   └── sweep_params.yaml              # Parameter sweep configuration
 │
@@ -75,6 +79,10 @@ DQC-Emulator-Benchmarking/
 │   ├── job_submitter_all.sh           # Submits all jobs for all emulators
 │   └── job_submitter_one.sh           # Submits all jobs for a single emulator
 │
+├── tests/
+│   └── test_primitives.py             # Gate identities, partitioning, fidelity
+│                                      # (NumPy only; no emulator install needed)
+│
 └── plots/
     ├── plot_results.py                # Parses CSVs and generates figures
 ```
@@ -115,9 +123,25 @@ num_qubits_range: [4, 6, 8, 10, 12, 14, 16, 18, 20]
 num_nodes_range: [1, 2, 4, 8]
 theta_range: [0.0, 0.33, 0.66]
 shots: 100
+min_qubits_per_node: 2
 ```
 
 > **Interlin-q constraint:** `num_qubits` must be divisible by `num_nodes`.
+
+**Grid feasibility.** The sweep is a full cartesian product, so it contains
+points that are not valid distributed benchmarks:
+
+- *Impossible* — `num_qubits < num_nodes` (e.g. 4 qubits over 8 nodes). These
+  are always excluded; earlier versions accepted them and produced partitions
+  containing zero-qubit nodes.
+- *Degenerate* — a node holding a single qubit performs no local controlled
+  rotations, so the run measures communication overhead against an empty local
+  circuit. `min_qubits_per_node` controls these: `2` (default) excludes them,
+  `1` reproduces the original grid.
+
+`job_creator.py` prints every skipped combination and the reason, so the
+exclusions are visible rather than silent. With the defaults above, 336 of the
+432 grid points are emitted.
 
 ### 2. Generate SLURM job scripts
 
@@ -157,9 +181,14 @@ Activate the environment and run the script directly from its `scripts/` directo
 
 ```bash
 conda activate qiskit_conda
-cd emulators/qiskit_aer/scripts
-python qft_multinode.py --num_qubits 8 --num_nodes 2 --theta 0.33 --shots 100
+python emulators/qiskit_aer/scripts/qft_multinode.py \
+    --num_qubits 8 --num_nodes 2 --theta 0.33 --shots 100
 ```
+
+All scripts resolve paths relative to their own location, so they can be
+launched from the repository root, from their own directory, or from a SLURM
+working directory. Results are always written to
+`emulators/<name>/results/`.
 
 For SquidASM, `qft_multinode.py` auto-generates a temporary NetSquid network config at runtime from `config_template.yaml`, which must be present in the same directory.
 
@@ -167,17 +196,36 @@ For SquidASM, `qft_multinode.py` auto-generates a temporary NetSquid network con
 
 ## Output Format
 
-Each run writes a CSV to `emulators/<name>/results/<name>_<nodes>_q<qubits>_a<theta>.csv`:
+Each run writes a **single-row** CSV to
+`emulators/<name>/results/<algorithm>_<name>_<nodes>_q<qubits>_a<theta>.csv`:
 
 | Column | Description |
 |---|---|
+| `Algorithm` | Benchmark discriminator (`qft`, and future additions) |
 | `Emulator` | Emulator name |
-| `Num Qubits` | Total logical qubits |
 | `Nodes` | Number of distributed nodes |
+| `Num Qubits` | Total logical qubits |
 | `Theta` | Phase angle for Fourier state preparation |
+| `Shots` | Number of repetitions |
 | `Execution Time (s)` | Wall-clock simulation time |
+| `Current Memory (KB)` | Memory at end of run via `tracemalloc` |
 | `Peak Memory (KB)` | Peak memory via `tracemalloc` |
-| `Fidelity` | Classical fidelity vs. monolithic reference |
+| `Fidelity` | Classical fidelity vs. the analytic inverse-QFT distribution |
+| `Result` | Measured phase histogram |
+
+Two conventions matter and are enforced by `common/dqc_common.write_result_row`:
+
+- **One row per run.** `plots/plot_results.py` concatenates every CSV under
+  `emulators/*/results/`, so a file with any other shape corrupts the combined
+  DataFrame silently. Auxiliary outputs that are not one-row-per-run (for
+  example cost landscapes) belong in a subdirectory such as
+  `results/landscapes/`, outside that glob.
+- **`Algorithm` is always written.** Without it, adding a second benchmark
+  contaminates the QFT figures. Files predating this column are backfilled as
+  `qft` when parsed.
+
+`Fidelity` is computed per run, at the point where the raw counts exist, rather
+than reconstructed later from the stringified histogram.
 
 ---
 
@@ -186,11 +234,34 @@ Each run writes a CSV to `emulators/<name>/results/<name>_<nodes>_q<qubits>_a<th
 Once results are collected:
 
 ```bash
-cd plots
-python plot_results.py
+python plots/plot_results.py --save-path plots/scaling_2panel
 ```
 
-The script scans all `emulators/*/results/*.csv`, aggregates them, and produces the scaling figures. An interactive version is available in `emulators/benchmark_multinode_figures.ipynb`.
+Options:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--base-dir` | repo-relative `emulators/` | Where to look for result CSVs |
+| `--algorithm` | `qft` | Which benchmark to plot |
+| `--save-path` | none (interactive) | Path prefix for saved `.png` / `.svg` |
+
+The script scans `emulators/*/results/*.csv`, filters by `Algorithm`, and
+produces the scaling and fidelity figures. An interactive version is available
+in `plots/benchmark_multinode_figures.ipynb`.
+
+---
+
+## Tests
+
+```bash
+python tests/test_primitives.py          # or: python -m pytest tests/ -v
+```
+
+The tests require only NumPy — no emulator installation and no NetSquid licence
+— so they run from a fresh clone. They cover the controlled-phase gate
+identities used by the distributed ladder, qubit partitioning, and the analytic
+inverse-QFT reference distribution against which `Fidelity` is computed. The
+Qiskit end-to-end check skips cleanly if Qiskit is absent.
 
 ---
 
@@ -243,4 +314,4 @@ This work was supported by MICINN through the European Union NextGenerationEU re
 
 ## License
 
-See `LICENSE` for details.
+Released under the MIT License. See `LICENSE` for the full text.

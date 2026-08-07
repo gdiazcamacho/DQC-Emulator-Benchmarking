@@ -1,0 +1,241 @@
+"""
+Shared helpers for the DQC emulator benchmarking suite.
+
+This module is imported by every emulator script (Qiskit Aer, SquidASM,
+Interlin-q, SQUANCH). It is deliberately restricted to the standard library
+plus NumPy so that it imports cleanly in all four conda environments,
+including the Python 3.8 SquidASM environment.
+
+Rationale: `distribute_qubits` and the results-CSV writer were previously
+copy-pasted into all four scripts. The copies had already drifted (SQUANCH's
+`distribute_qubits` silently dropped the low-qubit-count warning), which is
+exactly the failure mode that makes a cross-emulator comparison unfalsifiable:
+if the partitioning differs between emulators, the emulators are not running
+the same benchmark.
+
+Usage from an emulator script:
+
+    import os, sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "..", "..", ".."))
+    from common.dqc_common import distribute_qubits, write_result_row
+"""
+
+import csv
+import os
+import warnings
+
+import numpy as np
+
+__all__ = [
+    "distribute_qubits",
+    "partition_list",
+    "ideal_qft_probs",
+    "classical_fidelity",
+    "fidelity_from_counts",
+    "repo_root",
+    "results_dir",
+    "write_result_row",
+    "CSV_COLUMNS",
+]
+
+
+# --------------------------------------------------------------------------- #
+# Qubit partitioning
+# --------------------------------------------------------------------------- #
+
+def distribute_qubits(num_qubits, num_nodes):
+    """Distribute `num_qubits` across `num_nodes`, giving the remainder to the
+    last nodes.
+
+    Returns a list of length `num_nodes` summing to `num_qubits`, with sizes
+    differing by at most one and the larger nodes first.
+
+    A node holding <= 1 qubit performs no local controlled rotations, so the
+    partition degenerates. That is legal but usually not what was intended,
+    hence the warning.
+    """
+    if num_nodes < 1:
+        raise ValueError("num_nodes must be >= 1")
+    if num_qubits < num_nodes:
+        raise ValueError(
+            "num_qubits ({0}) < num_nodes ({1}): cannot give every node a "
+            "qubit".format(num_qubits, num_nodes)
+        )
+
+    base = (num_qubits + num_nodes - 1) // num_nodes  # ceiling division
+    qubits = [base] * num_nodes
+    over = sum(qubits) - num_qubits
+
+    # Remove 1 from the last 'over' nodes (starting from the end)
+    for i in range(over):
+        qubits[-(i + 1)] -= 1
+
+    assert sum(qubits) == num_qubits, "partition does not conserve qubit count"
+
+    if any(q <= 1 for q in qubits):
+        warnings.warn(
+            "Partition {0} has a node with <= 1 qubit; that node contributes "
+            "no local controlled rotations.".format(qubits),
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    return qubits
+
+
+def partition_list(lst, partition_spec):
+    """Split `lst` into consecutive chunks.
+
+    `partition_spec` is either an int (number of equal-ish chunks, computed via
+    `distribute_qubits`) or an explicit list of chunk sizes.
+    """
+    if isinstance(partition_spec, int):
+        partition_spec = distribute_qubits(len(lst), partition_spec)
+
+    if not isinstance(partition_spec, (list, tuple)):
+        raise TypeError("partition_spec must be an int or a list of ints.")
+
+    if sum(partition_spec) != len(lst):
+        raise ValueError("Sum of partition sizes does not match list length.")
+
+    result = []
+    idx = 0
+    for size in partition_spec:
+        result.append(lst[idx: idx + size])
+        idx += size
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# Ideal reference distribution and fidelity
+# --------------------------------------------------------------------------- #
+
+def ideal_qft_probs(theta, num_qubits, eps=1e-12):
+    """Exact output distribution of the inverse QFT applied to the Fourier
+    state parameterised by `theta`.
+
+    Returns (x, probs) where x = k / 2**num_qubits are the phase bins.
+    """
+    N = 2 ** num_qubits
+    ks = np.arange(N)
+    x = ks / N
+    angle = np.pi * (theta - x)
+
+    probs = np.zeros(N)
+    small = np.abs(angle) < eps
+    not_small = ~small
+
+    probs[small] = 1.0
+    probs[not_small] = (
+        np.sin(N * angle[not_small]) ** 2
+        / (N ** 2 * np.sin(angle[not_small]) ** 2)
+    )
+    return x, probs
+
+
+def classical_fidelity(p_sim, p_ideal):
+    """Bhattacharyya (classical) fidelity between two discrete distributions."""
+    p_sim = np.asarray(p_sim, dtype=float)
+    p_ideal = np.asarray(p_ideal, dtype=float)
+    if p_sim.sum() <= 0 or p_ideal.sum() <= 0:
+        raise ValueError("distributions must have positive total weight")
+    p_sim = p_sim / p_sim.sum()
+    p_ideal = p_ideal / p_ideal.sum()
+    return float(np.sum(np.sqrt(p_sim * p_ideal)) ** 2)
+
+
+def fidelity_from_counts(counts, num_qubits, theta):
+    """Fidelity of a measured result against the ideal inverse-QFT output.
+
+    `counts` maps phase values in [0, 1) (as produced by every emulator script
+    in this suite) to shot counts. Missing outcomes are treated as zero.
+
+    Computed per run, at the point where the raw counts exist, rather than
+    reconstructed later from a stringified dict in the CSV.
+    """
+    N = 2 ** num_qubits
+    p_sim = np.zeros(N)
+    for k, v in counts.items():
+        idx = int(round(float(k) * N))
+        if not (0 <= idx < N):
+            raise ValueError("phase key {0!r} outside [0, 1)".format(k))
+        p_sim[idx] += v
+
+    _, p_ideal = ideal_qft_probs(theta, num_qubits)
+    return classical_fidelity(p_sim, p_ideal)
+
+
+# --------------------------------------------------------------------------- #
+# Paths and results CSV
+# --------------------------------------------------------------------------- #
+
+def repo_root():
+    """Absolute path of the repository root, derived from this file's location.
+
+    Everything downstream is anchored here so that scripts behave identically
+    whether launched from the repo root, from `emulators/<name>/scripts/`, or
+    from a SLURM working directory.
+    """
+    return os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+
+def results_dir(emulator):
+    """Return (and create) the results directory for a given emulator."""
+    path = os.path.join(repo_root(), "emulators", emulator, "results")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+CSV_COLUMNS = [
+    "Algorithm",
+    "Emulator",
+    "Nodes",
+    "Num Qubits",
+    "Theta",
+    "Shots",
+    "Execution Time (s)",
+    "Current Memory (KB)",
+    "Peak Memory (KB)",
+    "Fidelity",
+    "Result",
+]
+
+
+def write_result_row(emulator, num_nodes, num_qubits, theta, shots,
+                     execution_time, current_kb, peak_kb, result,
+                     algorithm="qft", fidelity=None, path=None):
+    """Write a single benchmark run to its own one-row CSV.
+
+    The suite's convention is strictly one row per run: `plot_results.py`
+    concatenates every CSV under `emulators/*/results/`, so any file with a
+    different shape corrupts the combined DataFrame silently.
+
+    `Algorithm` discriminates between benchmarks (qft, grover, qaoa, qpe, ...)
+    so that adding a second algorithm does not contaminate the QFT figures.
+    """
+    if path is None:
+        path = os.path.join(
+            results_dir(emulator),
+            "{0}_{1}_{2}_q{3}_a{4}.csv".format(
+                algorithm, emulator, num_nodes, num_qubits, theta
+            ),
+        )
+
+    with open(path, mode="w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(CSV_COLUMNS)
+        writer.writerow([
+            algorithm,
+            emulator,
+            num_nodes,
+            num_qubits,
+            theta,
+            shots,
+            execution_time,
+            current_kb,
+            peak_kb,
+            "" if fidelity is None else fidelity,
+            result,
+        ])
+    return path

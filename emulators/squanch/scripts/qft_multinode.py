@@ -2,7 +2,6 @@
 import logging
 import numpy as np
 import argparse
-import csv
 
 from typing import List
 from collections import Counter
@@ -14,18 +13,22 @@ import os
 import time
 import tracemalloc
 
+# --- shared helpers -----------------------------------------------------------
+# Anchor on this file's location so the script runs identically from the repo
+# root, from this directory, or from a SLURM working directory.
+import os as _os, sys as _sys
+_REPO_ROOT = _os.path.abspath(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", ".."))
+if _REPO_ROOT not in _sys.path:
+    _sys.path.insert(0, _REPO_ROOT)
+from common.dqc_common import (
+    distribute_qubits, fidelity_from_counts, write_result_row,
+)
+# ------------------------------------------------------------------------------
+
 from squanch import Agent, QStream, H, RZ, CNOT, CPHASE, X, Z
 
 
 # ---------- Helpers ----------
-def distribute_qubits(num_qubits: int, num_nodes: int):
-    base = (num_qubits + num_nodes - 1) // num_nodes  # ceil
-    qubits = [base] * num_nodes
-    over = sum(qubits) - num_qubits
-    for i in range(over):
-        qubits[-(i + 1)] -= 1
-    return qubits
-
 def global_offsets(network_structure):
     offs, total = {}, 0
     for name, nq in network_structure.items():
@@ -242,16 +245,13 @@ if __name__ == "__main__":
     sorted_counts = dict(sorted(counts.items()))
     print(f"Phases Counts: {sorted_counts}")
     
-    # Save to CSV
-    csv_file_path = f"../results/{emulator}_{num_nodes}_q{num_qubits}_a{theta}.csv"
-    with open(csv_file_path, mode='w', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow([
-            "Emulator", "Nodes", "Num Qubits", "Theta", "Shots",
-            "Execution Time (s)", "Current Memory (KB)", "Peak Memory (KB)", "Result"
-        ])
-        writer.writerow([
-            emulator, num_nodes, num_qubits, theta, shots,
-            execution_time, current / 1024, peak / 1024, sorted_counts
-        ])
+    fidelity = fidelity_from_counts(sorted_counts, num_qubits, theta)
+    print(f"Fidelity: {fidelity}")
 
+    csv_file_path = write_result_row(
+        emulator=emulator, num_nodes=num_nodes, num_qubits=num_qubits,
+        theta=theta, shots=shots, execution_time=execution_time,
+        current_kb=current / 1024, peak_kb=peak / 1024,
+        result=sorted_counts, algorithm="qft", fidelity=fidelity,
+    )
+    print(f"Wrote {csv_file_path}")

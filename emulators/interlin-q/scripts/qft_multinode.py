@@ -13,10 +13,21 @@ Logger.DISABLED = True
 from collections import Counter
 import string
 import argparse
-import csv
 
 import time
 import tracemalloc
+
+# --- shared helpers -----------------------------------------------------------
+# Anchor on this file's location so the script runs identically from the repo
+# root, from this directory, or from a SLURM working directory.
+import os as _os, sys as _sys
+_REPO_ROOT = _os.path.abspath(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", ".."))
+if _REPO_ROOT not in _sys.path:
+    _sys.path.insert(0, _REPO_ROOT)
+from common.dqc_common import (
+    distribute_qubits, fidelity_from_counts, write_result_row,
+)
+# ------------------------------------------------------------------------------
 ################################################################################
 
 def phase_gate(theta):
@@ -376,16 +387,13 @@ if __name__ == "__main__":
       print(f"Peak Memory Usage: {peak / 1024} KB")
       print(f"Result: {phases}")
       
-      # Define the CSV file path
-      csv_file_path = f"../results/{emulator}_{num_nodes}_q{num_qubits}_a{theta}.csv"
-      
-      # Write the results to a CSV file
-      with open(csv_file_path, mode='w', newline='') as file:
-          writer = csv.writer(file)
-          # Write the header
-          writer.writerow(["Emulator", "Nodes", "Num Qubits", "Theta", "Shots",
-                           "Execution Time (s)", "Current Memory (KB)", "Peak Memory (KB)", "Result"])
-          # Write the data
-          writer.writerow([emulator, num_nodes, num_qubits, theta, shots,
-                           execution_time, current / 1024, peak / 1024, phases])
-      
+      fidelity = fidelity_from_counts(phases, num_qubits, theta)
+      print(f"Fidelity: {fidelity}")
+
+      csv_file_path = write_result_row(
+          emulator=emulator, num_nodes=num_nodes, num_qubits=num_qubits,
+          theta=theta, shots=shots, execution_time=execution_time,
+          current_kb=current / 1024, peak_kb=peak / 1024,
+          result=phases, algorithm="qft", fidelity=fidelity,
+      )
+      print(f"Wrote {csv_file_path}")
