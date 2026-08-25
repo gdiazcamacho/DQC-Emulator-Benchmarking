@@ -1,21 +1,27 @@
 #!/bin/bash
-#SBATCH --job-name=squanch_multi
+#SBATCH --job-name={{JOB_NAME}}
 #SBATCH --output=../jobs/%x_%j.out
 #SBATCH --error=../jobs/%x_%j.err
 #SBATCH --time=06:00:00
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4  # Allocate 4 CPU cores
+#SBATCH --cpus-per-task=4
 #SBATCH --mem-per-cpu=4G
 
 # Load the necessary modules
 module purge
-module load miniconda3  # Adjust this to the correct module name if needed
+module load miniconda3
 
 # Activate the conda environment for the emulator
 conda activate squanch_conda
 
-# Run the Python script
-python ../scripts/qft_multinode.py --num_qubits=$1 --num_nodes=$2 --theta=$3 --shots=$4
+# The algorithm selects WHICH script runs; the communication mode selects a
+# branch INSIDE that script.
+python ../scripts/{{ALGORITHM}}_multinode.py \
+    --num_qubits={{NUM_QUBITS}} \
+    --num_nodes={{NUM_NODES}} \
+    --theta={{THETA}} \
+    --shots={{SHOTS}} \
+    --comm_mode={{COMM_MODE}}
 
 # Summarize resource usage with seff
 seff $SLURM_JOBID

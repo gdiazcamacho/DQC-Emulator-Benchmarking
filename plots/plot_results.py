@@ -1,72 +1,94 @@
-"""
-Figure generation for the DQC emulator benchmarking suite.
-
-Run from anywhere:
-
-    python plots/plot_results.py --save-path plots/scaling_2panel
-"""
-
-import argparse
-import ast
 import os
-
-import matplotlib.cm as cm
-import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
-from matplotlib.colors import LinearSegmentedColormap
+import matplotlib.pyplot as plt
+
+import numpy as np
+from qiskit.quantum_info import hellinger_fidelity
+import ast
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib.lines import Line2D
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-
-# Shared fidelity reference, so figures and per-run CSV columns cannot drift apart.
-import sys
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
-from common.dqc_common import fidelity_from_counts
 
 
-def parse_csv_results(base_dir=None, algorithm="qft"):
-    """Concatenate every one-row result CSV under emulators/*/results/.
+def parse_csv_results(base_dir, algorithm=None, comm_mode=None, noise=None):
+    """Load every results CSV under base_dir/<emulator>/results/.
 
-    Rows are filtered by `Algorithm`. Legacy files written before that column
-    existed are backfilled as "qft", which is what they were. Without this
-    filter, adding a second benchmark silently contaminates the QFT figures.
+    Results are now identified by SIX coordinates:
+        (Emulator, Algorithm, Comm Mode, Nodes, Num Qubits, Theta)
+
+    CSVs written before the Algorithm/Comm Mode axes existed are back-filled
+    with ('iqft', 'packed'), which is what those runs actually were. Pass
+    algorithm=/comm_mode= to filter, or leave them None to load everything.
+
+    IMPORTANT: downstream helpers assume ONE row per coordinate tuple. If you
+    load several comm modes at once and then call a helper that does not filter
+    on Comm Mode, it will silently pick an arbitrary one.
     """
-    if base_dir is None:
-        base_dir = os.path.join(REPO_ROOT, "emulators")
-
     data_frames = []
-    for emulator_dir in sorted(os.listdir(base_dir)):
-        results_dir = os.path.join(base_dir, emulator_dir, "results")
-        if not os.path.isdir(results_dir):
-            continue
-        for result_file in sorted(os.listdir(results_dir)):
-            if not result_file.endswith(".csv"):
-                continue
-            df = pd.read_csv(os.path.join(results_dir, result_file))
-            data_frames.append(df)
+
+    for emulator_dir in os.listdir(base_dir):
+        results_dir = os.path.join(base_dir, emulator_dir, 'results')
+        if os.path.isdir(results_dir):
+            for result_file in os.listdir(results_dir):
+                if result_file.endswith('.csv'):
+                    file_path = os.path.join(results_dir, result_file)
+                    df = pd.read_csv(file_path)
+                    data_frames.append(df)
 
     if not data_frames:
-        raise SystemExit(
-            "No result CSVs found under {0}. Run the sweep first "
-            "(scripts/job_creator.py then scripts/job_submitter_all.sh).".format(base_dir)
-        )
+        raise FileNotFoundError(f"No result CSVs found under {base_dir}")
 
     combined_df = pd.concat(data_frames, ignore_index=True)
 
+    # Back-compatibility with pre-refactor CSVs
     if "Algorithm" not in combined_df.columns:
         combined_df["Algorithm"] = "qft"
-    else:
-        combined_df["Algorithm"] = combined_df["Algorithm"].fillna("qft")
+    if "Comm Mode" not in combined_df.columns:
+        # Rows predating the axis: derive from the legacy Packed boolean where
+        # present, else assume packed (what those runs actually were).
+        if "Packed" in combined_df.columns:
+            combined_df["Comm Mode"] = combined_df["Packed"].map(
+                {True: "packed", False: "basic", "True": "packed", "False": "basic"}
+            ).fillna("packed")
+        else:
+            combined_df["Comm Mode"] = "packed"
+    # Runs predating the Noise column ALWAYS applied the depolarizing model.
+    if "Noise" not in combined_df.columns:
+        combined_df["Noise"] = "depolarizing"
+    combined_df["Noise"] = combined_df["Noise"].fillna("depolarizing")
+    combined_df["Algorithm"] = combined_df["Algorithm"].fillna("qft")
+    combined_df["Comm Mode"] = combined_df["Comm Mode"].fillna("packed")
 
     if algorithm is not None:
-        combined_df = combined_df[combined_df["Algorithm"] == algorithm].reset_index(drop=True)
-        if combined_df.empty:
-            raise SystemExit("No rows with Algorithm == {0!r}.".format(algorithm))
+        combined_df = combined_df[combined_df["Algorithm"] == algorithm]
+    if comm_mode is not None:
+        combined_df = combined_df[combined_df["Comm Mode"] == comm_mode]
+    if noise is not None:
+        combined_df = combined_df[combined_df["Noise"] == noise]
+
+    # Warn loudly rather than silently averaging across modes
+    key = ["Emulator", "Algorithm", "Comm Mode", "Noise", "Nodes", "Num Qubits",
+           "Theta"]
+    dupes = combined_df.duplicated(subset=key, keep=False)
+    n_noise = combined_df["Noise"].nunique()
+    if n_noise > 1:
+        print(f"[warn] {n_noise} noise settings loaded "
+              f"({sorted(combined_df['Noise'].unique())}). Fidelity is not "
+              f"comparable across them; filter with noise=.")
+    n_modes = combined_df["Comm Mode"].nunique()
+    if n_modes > 1:
+        print(f"[warn] {n_modes} communication modes loaded "
+              f"({sorted(combined_df['Comm Mode'].unique())}). "
+              f"Filter with comm_mode= before plotting, or repetitions and "
+              f"modes will be conflated.")
+    if dupes.any():
+        print(f"[info] {dupes.sum()} rows share a coordinate tuple "
+              f"(treated as repetitions).")
 
     return combined_df
-
 
 def truncate_colormap(cmap, minval=0.0, maxval=0.8, n=100):
     """
@@ -86,6 +108,8 @@ def time_memory_vs_qubits(
     figsize=(16, 8),
     linewidth=2.0,
     alpha=0.95,
+    comm_mode=None,
+    algorithm=None,
 ):
     """
     Side-by-side plot:
@@ -96,8 +120,20 @@ def time_memory_vs_qubits(
     Error bars: mean +- std over repetitions.
     """
 
+    # Restrict to one algorithm / communication mode before aggregating.
+    # Without this, the groupby('Num Qubits').agg(['mean','std']) below would
+    # average ACROSS modes and report their spread as if it were run-to-run
+    # variance.
+    if comm_mode is not None:
+        df = df[df["Comm Mode"] == comm_mode]
+    if algorithm is not None:
+        df = df[df["Algorithm"] == algorithm]
+    if df["Comm Mode"].nunique() > 1:
+        print("[warn] time_memory_vs_qubits called with multiple comm modes; "
+              "error bars will conflate modes with repetitions.")
+
     # Desired emulator order and normalization
-    emulator_order = ["qiskit-aer", "squidasm", "squanch", "interlin-q"]
+    emulator_order = ["qiskit-aer", "squidasm", "squanch", "interlin-q", "cunqa"]
     def norm_name(name): return str(name).lower().replace("_", "-")
 
     # Filter and order DataFrame emulators
@@ -115,6 +151,7 @@ def time_memory_vs_qubits(
         "qiskit-aer": truncate_colormap(cm.Purples_r, 0.0, 0.6),
         "interlin-q": truncate_colormap(cm.Greens_r, 0.0, 0.6),
         "squanch": truncate_colormap(cm.Oranges_r, 0.0, 0.8),
+        "cunqa": truncate_colormap(cm.Reds_r, 0.0, 0.6),
     }
 
     # Custom markers and line styles
@@ -123,6 +160,7 @@ def time_memory_vs_qubits(
         "squidasm":   ('s', 'dashdot'),
         "squanch":    ('^', 'dashed'),
         "interlin-q": ('D', 'dotted'),
+        "cunqa": ('v', (0, (3, 1, 1, 1))),
     }
 
     # Helper to sample cmap evenly for k steps
@@ -200,45 +238,143 @@ def time_memory_vs_qubits(
     else:
         plt.show()
 
-def fidelity_per_nq_nodes(emulator, df):
-    """Mean fidelity over thetas for each (num_qubits, nodes) pair.
+def fidelity_emulator(emulator, df, comm_mode=None, algorithm=None, noise=None):
+    """Compare distributed vs single-node fidelity for one emulator.
 
-    Uses the per-run `Fidelity` column when present. Older CSVs predate that
-    column, so fidelity is recomputed from the stored counts as a fallback --
-    both paths call the same `fidelity_from_counts`, so they cannot diverge.
+    The queries below match on (Emulator, Num Qubits, Nodes, Theta) only, so
+    with several comm modes or noise settings loaded they return multiple rows
+    and pick one arbitrarily. Filter first."""
+    if comm_mode is not None:
+        df = df[df["Comm Mode"] == comm_mode]
+    if algorithm is not None:
+        df = df[df["Algorithm"] == algorithm]
+    if noise is not None:
+        df = df[df["Noise"] == noise]
+
+    qubit_values = df["Num Qubits"].unique()
+    theta_values = df["Theta"].unique()
+
+    fid_nq = {}
+    for nq in sorted(qubit_values):
+        fid = []
+        for theta in sorted(theta_values):
+            result_row1 = df.query(
+                "Emulator == @emulator and Nodes == 1 and `Num Qubits` == @nq and Theta == @theta"
+            )
+            result_row2 = df.query(
+                "Emulator == @emulator and Nodes == 2 and `Num Qubits` == @nq and Theta == @theta"
+            )
+
+            if not result_row1.empty:
+                if not result_row2.empty:
+                    counts1 = ast.literal_eval(result_row1.iloc[0]["Result"])
+                    counts2 = ast.literal_eval(result_row2.iloc[0]["Result"])
+                    fid.append(hellinger_fidelity(counts1, counts2))
+
+        if fid:
+            fid_nq[nq]=np.mean(fid)
+    return fid_nq
+
+
+def ideal_qft_probs(theta, nq, eps=1e-12):
+    N = 2**nq
+    ks = np.arange(N)
+    x = ks / N
+    angle = np.pi * (theta - x)
+    
+    probs = np.zeros(N)
+    small = np.abs(angle) < eps          # indices very close to zero
+    not_small = ~small
+    
+    probs[small] = 1.0                   # probability concentrated at the peak
+    probs[not_small] = np.sin(N * angle[not_small])**2 / (N**2 * np.sin(angle[not_small])**2)
+    
+    return x, probs
+
+
+def classical_fidelity(Psim, Pideal):
     """
+    Compute classical fidelity between two discrete probability distributions.
+    Both Psim and Pideal must be arrays of the same length and sum to 1.
+    """
+    Psim = np.array(Psim)
+    Pideal = np.array(Pideal)
+    
+    # normalize just in case
+    Psim = Psim / Psim.sum()
+    Pideal = Pideal / Pideal.sum()
+    
+    fid = np.sum(np.sqrt(Psim * Pideal))**2
+    return fid
+
+def compute_full_fidelity(counts, nq, theta):
+    """
+    Compute fidelity between measured counts and ideal IQFT distribution.
+    Pads counts with zeros for missing outcomes.
+    """
+    N = 2**nq
+    x_full = np.arange(N) / N
+
+    # Build Psim_full (padded with zeros)
+    Psim_full = np.zeros(N)
+    for k, v in counts.items():
+        # If keys are floats already normalized in [0,1], convert to index
+        idx = int(round(k * N))
+        Psim_full[idx] = v
+    Psim_full /= Psim_full.sum()
+
+    # Ideal distribution
+    _, Pideal_full = ideal_qft_probs(theta, nq)
+
+    # Classical fidelity
+    fid = np.sum(np.sqrt(Psim_full * Pideal_full))**2
+    return fid
+
+def fidelity_per_nq_nodes(emulator, df, comm_mode=None, algorithm=None):
+    """
+    Loop over all (nq, nodes) tuples and compute mean fidelity across thetas.
+
+    comm_mode/algorithm restrict the selection. Leaving them None is only safe
+    when df already contains a single mode: otherwise the per-row query below
+    matches several rows and .iloc[0] would pick one arbitrarily.
+    """
+    if comm_mode is not None:
+        df = df[df["Comm Mode"] == comm_mode]
+    if algorithm is not None:
+        df = df[df["Algorithm"] == algorithm]
     qubit_values = sorted(df["Num Qubits"].unique())
-    node_values = sorted(df["Nodes"].unique())
+    node_values  = sorted(df["Nodes"].unique())
     theta_values = sorted(df["Theta"].unique())
 
-    has_column = "Fidelity" in df.columns
     fid_dict = {}
 
     for nq in qubit_values:
         for nodes in node_values:
             fid_thetas = []
+
             for theta in theta_values:
                 row = df.query(
-                    "Emulator == @emulator and `Num Qubits` == @nq and "
-                    "Nodes == @nodes and Theta == @theta"
+                    "Emulator == @emulator and `Num Qubits` == @nq and Nodes == @nodes and Theta == @theta"
                 )
                 if row.empty:
                     continue
+                if len(row) > 1 and row["Comm Mode"].nunique() > 1:
+                    print(f"[warn] {emulator} nq={nq} nodes={nodes} theta={theta}: "
+                          f"{len(row)} rows across "
+                          f"{sorted(row['Comm Mode'].unique())}; using the first. "
+                          f"Pass comm_mode= to disambiguate.")
 
-                value = row.iloc[0]["Fidelity"] if has_column else None
-                if value is None or pd.isna(value):
-                    counts = ast.literal_eval(row.iloc[0]["Result"])
-                    value = fidelity_from_counts(counts, nq, theta)
-                fid_thetas.append(float(value))
+                counts = ast.literal_eval(row.iloc[0]["Result"])
+
+                fid = compute_full_fidelity(counts, nq, theta)
+                fid_thetas.append(fid)
 
             if fid_thetas:
-                fid_dict[(nq, nodes)] = float(np.mean(fid_thetas))
+                fid_dict[(nq, nodes)] = np.mean(fid_thetas)
 
     return fid_dict
 
-
-def plot_fidelity_curves(fid_dicts, emulator_cmaps, emulator_styles,
-                         variable="Num Qubits", save_path=None):
+def plot_fidelity_curves(fid_dicts, emulator_cmaps, emulator_styles, variable="Num Qubits"):
     if isinstance(fid_dicts, dict):
         fid_dicts = [("emulator", fid_dicts)]
 
@@ -297,54 +433,48 @@ def plot_fidelity_curves(fid_dicts, emulator_cmaps, emulator_styles,
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    if save_path:
-        plt.savefig(f"{save_path}.png", dpi=200, bbox_inches="tight")
-        plt.savefig(f"{save_path}.svg", format="svg", bbox_inches="tight")
-        print(f"Saved to {save_path}.png and {save_path}.svg")
-    else:
-        plt.show()
+    plt.show()
 
    
    
-def main():
-    parser = argparse.ArgumentParser(description="Generate benchmark figures.")
-    parser.add_argument("--base-dir", default=None,
-                        help="emulators/ directory (default: repo-relative)")
-    parser.add_argument("--algorithm", default="qft",
-                        help="Algorithm to plot (default: qft)")
-    parser.add_argument("--save-path", default=None,
-                        help="Path prefix for saved figures; omit to show interactively")
-    args = parser.parse_args()
+# Base directory containing the emulators
+base_dir = "../emulators"
 
-    df = parse_csv_results(args.base_dir, algorithm=args.algorithm)
+# Parse results and plot scaling
+df = parse_csv_results(base_dir)
 
-    save_path = args.save_path
-    if save_path is None and os.environ.get("MPLBACKEND", "") == "Agg":
-        save_path = os.path.join(REPO_ROOT, "plots", "scaling_2panel")
+time_memory_vs_qubits(df, save_path="scaling_2panel")
 
-    time_memory_vs_qubits(df, save_path=save_path)
+# Colormaps
+emulator_cmaps = {
+    "squidasm":   truncate_colormap(cm.ocean,     0.2, 0.8),
+    "qiskit_aer": truncate_colormap(cm.Purples_r, 0.0, 0.6),
+    "interlin-q": truncate_colormap(cm.Greens_r,  0.0, 0.6),
+    "squanch":    truncate_colormap(cm.Oranges_r, 0.0, 0.8),
+}
 
-    emulator_cmaps = {
-        "squidasm":   truncate_colormap(cm.ocean,     0.2, 0.8),
-        "qiskit_aer": truncate_colormap(cm.Purples_r, 0.0, 0.6),
-        "interlin-q": truncate_colormap(cm.Greens_r,  0.0, 0.6),
-        "squanch":    truncate_colormap(cm.Oranges_r, 0.0, 0.8),
-    }
-    emulator_styles = {
-        "qiskit_aer": ("o", "solid"),
-        "squidasm":   ("s", "dashdot"),
-        "squanch":    ("^", "dashed"),
-        "interlin-q": ("D", "dotted"),
-    }
+# Markers and line styles
+emulator_styles = {
+    "qiskit_aer": ('o', 'solid'),
+    "squidasm":   ('s', 'dashdot'),
+    "squanch":    ('^', 'dashed'),
+    "interlin-q": ('D', 'dotted'),
+}
 
-    fid_dicts = [(name, fidelity_per_nq_nodes(name, df))
-                 for name in ("squidasm", "qiskit_aer", "squanch", "interlin-q")]
+# Example data
+fid_squanch = fidelity_per_nq_nodes("squanch", df)
+fid_squidasm = fidelity_per_nq_nodes("squidasm", df)
+fid_interlinq = fidelity_per_nq_nodes("interlin-q", df)
+fid_aer = fidelity_per_nq_nodes("qiskit_aer", df)
 
-    plot_fidelity_curves(
-        fid_dicts, emulator_cmaps, emulator_styles, variable="Num Qubits",
-        save_path=None if save_path is None else save_path + "_fidelity",
-    )
-
-
-if __name__ == "__main__":
-    main()
+plot_fidelity_curves(
+    [
+        ("squidasm", fid_squidasm),
+        ("qiskit_aer", fid_aer),
+        ("squanch", fid_squanch),
+        ("interlin-q", fid_interlinq),
+    ],
+    emulator_cmaps,
+    emulator_styles,
+    variable="Num Qubits"
+)

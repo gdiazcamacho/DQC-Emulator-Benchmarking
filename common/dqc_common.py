@@ -37,6 +37,8 @@ __all__ = [
     "results_dir",
     "write_result_row",
     "CSV_COLUMNS",
+    "COMM_MODES",
+    "NOISE_SETTINGS",
 ]
 
 
@@ -189,6 +191,7 @@ def results_dir(emulator):
 
 CSV_COLUMNS = [
     "Algorithm",
+    "Comm Mode",
     "Emulator",
     "Nodes",
     "Num Qubits",
@@ -197,14 +200,37 @@ CSV_COLUMNS = [
     "Execution Time (s)",
     "Current Memory (KB)",
     "Peak Memory (KB)",
+    "Noise",
     "Fidelity",
+    "Ebits",
+    "Packed",
     "Result",
 ]
+
+# Communication modes. `Packed` (bool) cannot express more than two, so
+# `Comm Mode` is the discriminating column; `Packed` is retained, derived, for
+# back-compatibility with existing figures.
+#   basic   - one teleportation per cross-node controlled-phase gate
+#   packed  - cat-entangle/disentangle packing (one teleportation per control)
+#   dynamic - deferred-measurement / semiclassical iQFT (zero e-bits)
+#   native  - the emulator partitions and teleports on its own; the schedule is
+#             not user-controlled, so its e-bit count is NOT comparable to ours
+COMM_MODES = ("basic", "packed", "dynamic", "native")
+
+_PACKED_FROM_MODE = {"packed": True, "basic": False, "dynamic": "", "native": ""}
+
+# Noise setting, recorded per run. A fidelity figure is meaningless without
+# knowing whether the run was noiseless, and previously nothing in the CSV
+# distinguished the two. Rows written before this column existed came from
+# runs that ALWAYS applied the depolarizing model, so that is the back-fill
+# value used by plot_results.py.
+NOISE_SETTINGS = ("none", "depolarizing", "device")
 
 
 def write_result_row(emulator, num_nodes, num_qubits, theta, shots,
                      execution_time, current_kb, peak_kb, result,
-                     algorithm="qft", fidelity=None, path=None):
+                     algorithm="qft", fidelity=None, ebits=None, packed=None,
+                     comm_mode=None, noise="depolarizing", path=None):
     """Write a single benchmark run to its own one-row CSV.
 
     The suite's convention is strictly one row per run: `plot_results.py`
@@ -213,12 +239,35 @@ def write_result_row(emulator, num_nodes, num_qubits, theta, shots,
 
     `Algorithm` discriminates between benchmarks (qft, grover, qaoa, qpe, ...)
     so that adding a second algorithm does not contaminate the QFT figures.
+
+    `ebits` and `packed` support the telegate-packing ablation: `ebits` is the
+    number of entangling rounds (Bell pairs) consumed by the run, and `packed`
+    records whether the run used the packed cat-comm construction (True) or
+    the naive one-Bell-pair-per-gate baseline (False). Both are left blank
+    ("") when not applicable -- most emulator scripts do not yet report this
+    and should not be assumed to be one or the other by a reader of the CSV.
     """
+    # `comm_mode` MUST appear in the filename. Without it a basic run and a
+    # packed run of the same (algorithm, emulator, nodes, qubits, theta) write
+    # to the same path and the second silently overwrites the first.
+    if comm_mode is None:
+        # Infer from the legacy boolean so existing callers keep working.
+        comm_mode = {True: "packed", False: "basic"}.get(packed, "packed")
+    if comm_mode not in COMM_MODES:
+        raise ValueError(
+            "comm_mode {0!r} not in {1}".format(comm_mode, COMM_MODES))
+    if packed is None:
+        packed = _PACKED_FROM_MODE[comm_mode]
+
+    if noise not in NOISE_SETTINGS:
+        raise ValueError("noise {0!r} not in {1}".format(noise, NOISE_SETTINGS))
+
     if path is None:
         path = os.path.join(
             results_dir(emulator),
-            "{0}_{1}_{2}_q{3}_a{4}.csv".format(
-                algorithm, emulator, num_nodes, num_qubits, theta
+            "{0}_{1}_{2}_{3}_{4}_q{5}_a{6}.csv".format(
+                algorithm, comm_mode, noise, emulator, num_nodes, num_qubits,
+                theta
             ),
         )
 
@@ -227,6 +276,7 @@ def write_result_row(emulator, num_nodes, num_qubits, theta, shots,
         writer.writerow(CSV_COLUMNS)
         writer.writerow([
             algorithm,
+            comm_mode,
             emulator,
             num_nodes,
             num_qubits,
@@ -235,7 +285,10 @@ def write_result_row(emulator, num_nodes, num_qubits, theta, shots,
             execution_time,
             current_kb,
             peak_kb,
+            noise,
             "" if fidelity is None else fidelity,
+            "" if ebits is None else ebits,
+            "" if packed is None else packed,
             result,
         ])
     return path

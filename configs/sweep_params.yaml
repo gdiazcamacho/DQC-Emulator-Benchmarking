@@ -1,8 +1,25 @@
+# Emulators to benchmark. Directory names under emulators/
 emulators:
   - qiskit_aer
   - squidasm
   - interlin-q
   - squanch
+  - cunqa
+
+# Algorithm selects WHICH script runs: scripts/<algorithm>_multinode.py
+algorithms:
+  - qft
+
+# Communication mode selects a branch INSIDE that script.
+#   basic   - one teleportation per cross-node controlled-phase gate
+#   packed  - cat-entangle/disentangle packing (one teleportation per control)
+#   dynamic - deferred-measurement / semiclassical iQFT (zero e-bits)
+#   native  - emulator partitions and teleports on its own (not user-controlled)
+comm_modes:
+  - basic
+  - packed
+  - dynamic
+  - native
 
 num_qubits_range:
   - 4
@@ -27,13 +44,3 @@ theta_range:
   - 0.66
 
 shots: 100
-
-# Minimum number of qubits a node must hold for a (qubits, nodes) point to be
-# included in the sweep. A node with a single qubit performs no local
-# controlled rotations, so such a point measures communication overhead against
-# an empty local circuit rather than a partitioned iQFT.
-#   2 -> exclude degenerate partitions (default; recommended)
-#   1 -> original grid, including [1, 1, ...] partitions
-# Partitions that are outright impossible (num_qubits < num_nodes) are always
-# excluded regardless of this setting.
-min_qubits_per_node: 2

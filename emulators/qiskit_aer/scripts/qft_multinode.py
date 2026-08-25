@@ -161,7 +161,24 @@ def recursive_qft(n,theta, partitions, swap_qubits=True, min_rotation=0, verbose
         
     return circ
 
-def recursive_qft_telegate(n,theta, num_nodes,swap_qubits=True, min_rotation=0, verbose=False):
+def recursive_qft_telegate(n, theta, num_nodes, swap_qubits=True, min_rotation=0,
+                           verbose=False, packing=True):
+    """Distributed inverse QFT via telegate.
+
+    `packing` controls the granularity of cat-comm:
+      - True (default): one Bell pair is shared across an entire column of
+        `cp` gates from a given control qubit to a given target node (the
+        packed construction this suite's e-bit-scaling claims are based on).
+      - False: one fresh Bell pair per individual controlled-phase gate --
+        the naive/basic telegate baseline, with no packing at all. This is
+        the ablation comparison point: it should reproduce O(n^2) e-bit
+        scaling where the packed construction gets O(n) (bipartite case).
+
+    Returns (circuit, ebits_used), where ebits_used counts calls to
+    `bell_pair` -- i.e. the number of entangling rounds consumed, which is
+    what the e-bits-vs-n ablation figure plots.
+    """
+    ebits_used = 0
     data_qubits = [q for q in range(n)]
     indices = partition_list(data_qubits, distribute_qubits(n, num_nodes))[::-1]
 
@@ -211,27 +228,35 @@ def recursive_qft_telegate(n,theta, num_nodes,swap_qubits=True, min_rotation=0, 
                     # If all the angles are smaller than the min_rotation, don't do anything 
                     if any(abs(angles) >= min_rotation):
 
-                        # The whole column of cp gates shares the same control: only one EPR
-                        # Adds a register for the EPR
-                        # We could add a classical register too, but for now reuse some clbits
+                        EPR_qubits = [control_EPR, target_EPR]
 
-                        EPR_qubits = [control_EPR,target_EPR]
-                #         circ.add_register(EPR_clbits)
-                        # Entangle them to create a Bell pair for the telegate
-                        bell_pair(circ,EPR_qubits)
+                        if packing:
+                            # The whole column of cp gates shares the same control: only one EPR
+                            bell_pair(circ, EPR_qubits)
+                            ebits_used += 1
+                            cat_entangle(circ, control, EPR_qubits, circ.clbits[0])
 
-                        cat_entangle(circ, control, EPR_qubits, circ.clbits[0])
+                            for k,target in enumerate(target_node[0:-1]):
+                                if verbose:
+                                    print('Target',target)
+                                if abs(angles[k]) >= min_rotation:
+                                    # Only apply gates larger than the min_rotation
+                                    # `cp`, not `crz` -- matches myqft_inverse() and the
+                                    # SquidASM implementation (AbstractNode.CP).
+                                    circ.cp(angles[k], EPR_qubits[1], target)
 
-                        for k,target in enumerate(target_node[0:-1]):
-                            if verbose:
-                                print('Target',target)
-                            if abs(angles[k]) >= min_rotation:
-                                # Only apply gates larger than the min_rotation
-                                # `cp`, not `crz` -- matches myqft_inverse() and the
-                                # SquidASM implementation (AbstractNode.CP).
-                                circ.cp(angles[k], EPR_qubits[1], target)
-
-                        cat_disentangle(circ, control, EPR_qubits, circ.clbits[0])    
+                            cat_disentangle(circ, control, EPR_qubits, circ.clbits[0])
+                        else:
+                            # Baseline: a fresh Bell pair per individual gate, no packing.
+                            for k,target in enumerate(target_node[0:-1]):
+                                if verbose:
+                                    print('Target',target)
+                                if abs(angles[k]) >= min_rotation:
+                                    bell_pair(circ, EPR_qubits)
+                                    ebits_used += 1
+                                    cat_entangle(circ, control, EPR_qubits, circ.clbits[0])
+                                    circ.cp(angles[k], EPR_qubits[1], target)
+                                    cat_disentangle(circ, control, EPR_qubits, circ.clbits[0])
 
                     circ.barrier()
                 circ.barrier()
@@ -242,23 +267,41 @@ def recursive_qft_telegate(n,theta, num_nodes,swap_qubits=True, min_rotation=0, 
     for i,q in enumerate(fourier_qubits):
         circ.measure(q,i)
         
-    return circ
+    return circ, ebits_used
 
 ###############################
 
-def run_DQFT(num_qft_qubits,num_nodes,theta,shots,verbose):
+def run_DQFT(num_qft_qubits, num_nodes, theta, shots, verbose, packing=True,
+             noise="depolarizing"):
+    """Run the distributed inverse QFT on Qiskit Aer.
 
-    # Create a simple noisy model
-    noise_model = NoiseModel()
-    noise_model.add_all_qubit_quantum_error(depolarizing_error(0.01, 1), ['x', 'h'])
-    noise_model.add_all_qubit_quantum_error(depolarizing_error(0.02, 2), ['cx'])
+    `noise` selects the error model:
+      "depolarizing" - 1% on single-qubit x/h, 2% on cx (the historical
+                       default: this was previously applied unconditionally,
+                       with no way to turn it off)
+      "none"         - noiseless, for correctness checking
 
-    backend = AerSimulator(noise_model = noise_model)
+    A noiseless path matters because it is the only way to tell a broken
+    construction from an accurate simulation of a noisy one. Under the
+    depolarizing model a correct circuit already returns fidelity ~0.81 at
+    n=4, so a genuinely wrong circuit is not obviously distinguishable from a
+    right one. Verify noiseless first, then sweep noise.
+    """
+    if noise == "none":
+        backend = AerSimulator()
+    elif noise == "depolarizing":
+        noise_model = NoiseModel()
+        noise_model.add_all_qubit_quantum_error(depolarizing_error(0.01, 1), ['x', 'h'])
+        noise_model.add_all_qubit_quantum_error(depolarizing_error(0.02, 2), ['cx'])
+        backend = AerSimulator(noise_model=noise_model)
+    else:
+        raise ValueError("unsupported noise setting: {0!r}".format(noise))
 
 #     all_qubits = [q for q in range(num_qft_qubits)]
 #     nodes = partition_list(all_qubits, partitions)[::-1]
 
-    dqc = recursive_qft_telegate(num_qft_qubits, theta, num_nodes, swap_qubits=False)
+    dqc, ebits_used = recursive_qft_telegate(
+        num_qft_qubits, theta, num_nodes, swap_qubits=False, packing=packing)
     dqct = transpile(dqc,backend)
     
     counts_d_all = backend.run(dqct, shots = shots).result().get_counts()
@@ -279,7 +322,7 @@ def run_DQFT(num_qft_qubits,num_nodes,theta,shots,verbose):
         k = int(bitstring, 2) / (2 ** n)
         phases[k]=value
     
-    return phases
+    return phases, ebits_used
     
 ###############################################
 if __name__ == "__main__":
@@ -290,23 +333,50 @@ if __name__ == "__main__":
     parser.add_argument('--num_nodes', type=int, required=True, help='Number of nodes')       
     parser.add_argument('--theta', type=float, required=True, help='Initial angle theta')
     parser.add_argument('--shots', type=int, required=True, help='Number of shots')
+    parser.add_argument('--comm_mode', type=str, default='packed',
+                        choices=['basic', 'packed'],
+                        help="Communication schedule. 'packed' uses the "
+                             "cat-entangle/disentangle construction (one "
+                             "teleportation per control qubit); 'basic' uses the "
+                             "naive one-Bell-pair-per-gate telegate baseline. "
+                             "These differ ONLY in the communication schedule, so "
+                             "(packed - basic) on a fixed emulator isolates the "
+                             "saving due to packing. See recursive_qft_telegate().")
+    parser.add_argument('--telegate_baseline', action='store_true',
+                        help='Deprecated alias for --comm_mode=basic.')
+    parser.add_argument('--noise', type=str, default='depolarizing',
+                        choices=['depolarizing', 'none'],
+                        help="Error model. Default 'depolarizing' preserves the "
+                             "historical behaviour (this model was previously "
+                             "applied unconditionally). Use 'none' to verify "
+                             "circuit correctness before interpreting any "
+                             "fidelity figure.")
 
     # Parse the arguments
     args = parser.parse_args()
     emulator = "qiskit_aer"
     verbose = False
-    config_file = 'config-QFT-noiseless.yaml'
     num_qubits = args.num_qubits
     num_nodes = args.num_nodes
     theta = args.theta
-    shots = args.shots    
+    shots = args.shots
+    comm_mode = 'basic' if args.telegate_baseline else args.comm_mode
+    packing = (comm_mode == 'packed')
+    # The communication schedule is its own axis: it belongs in 'Comm Mode',
+    # not folded into 'Algorithm'. Encoding it as a pseudo-algorithm
+    # ("qft_telegate_baseline") kept the ablation out of the main figures, but
+    # it multiplies the wrong axis as soon as a second algorithm arrives
+    # (grover, grover_telegate_baseline, ...). 'Comm Mode' also reaches the
+    # results filename, so runs cannot overwrite each other.
+    algorithm = "qft"
     
     # Start memory profiling
     tracemalloc.start()
     # Record the start time
     start_time = time.time()
     
-    phases = run_DQFT(num_qubits, num_nodes, theta, shots, verbose)
+    phases, ebits_used = run_DQFT(num_qubits, num_nodes, theta, shots, verbose,
+                                  packing=packing, noise=args.noise)
 
     # Record the end time
     end_time = time.time()
@@ -321,6 +391,7 @@ if __name__ == "__main__":
     print(f"Execution Time: {execution_time} seconds")
     print(f"Current Memory Usage: {current / 1024} KB")
     print(f"Peak Memory Usage: {peak / 1024} KB")
+    print(f"Comm mode: {comm_mode}  (e-bits used: {ebits_used})  noise: {args.noise}")
     print(f"Result: {phases}")
     
     # Fidelity against the ideal inverse-QFT distribution, computed here where
@@ -332,7 +403,9 @@ if __name__ == "__main__":
         emulator=emulator, num_nodes=num_nodes, num_qubits=num_qubits,
         theta=theta, shots=shots, execution_time=execution_time,
         current_kb=current / 1024, peak_kb=peak / 1024,
-        result=phases, algorithm="qft", fidelity=fidelity,
+        result=phases, algorithm=algorithm, fidelity=fidelity,
+        ebits=ebits_used, packed=packing, comm_mode=comm_mode,
+        noise=args.noise,
     )
     print(f"Wrote {csv_file_path}")
     
