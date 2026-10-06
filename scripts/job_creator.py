@@ -1,5 +1,6 @@
 import os
 import sys
+import warnings
 
 import yaml
 
@@ -27,7 +28,9 @@ SUPPORTED_COMM_MODES = {
     # Aer already distinguishes the two via --telegate_baseline.
     "qiskit_aer":  {"basic", "packed"},
     "squidasm":    {"packed"},
-    "squanch":     {"packed"},
+    # Both modes verified at fidelity 1.0 after the shared-QStream and
+    # ancilla-reset fixes (see CHANGELOG / diagnose_squanch.py).
+    "squanch":     {"basic", "packed"},
     # CUNQA builds the packed-column construction explicitly in its script, so
     # it is 'packed', not 'native': the schedule IS user-controlled.
     "cunqa":       {"packed"},
@@ -82,7 +85,13 @@ def is_feasible(num_qubits, num_nodes, min_qubits_per_node=2):
     to reproduce the original grid.
     """
     try:
-        partition = distribute_qubits(num_qubits, num_nodes)
+        # distribute_qubits warns about degenerate partitions, which is useful
+        # when an emulator script calls it but pure noise here: this function
+        # calls it precisely in order to REJECT those partitions, and the
+        # rejection is already reported in the skipped-points summary.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            partition = distribute_qubits(num_qubits, num_nodes)
     except ValueError as exc:
         return False, str(exc)
 

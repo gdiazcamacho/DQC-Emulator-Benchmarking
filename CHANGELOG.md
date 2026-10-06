@@ -29,6 +29,49 @@
   between modes as if it were run-to-run variance. Older CSVs are back-filled
   (`qft`, `packed` or the legacy `Packed` boolean, `depolarizing`).
 
+### Fixed
+- **SQUANCH: no quantum channel existed between nodes.** The runner allocated
+  one `QStream` per node. SQUANCH's quantum channel transmits only a
+  reference (`Qubit.serialize()` returns `(system_index, qubit_index)`) and
+  the receiver resolves it against its OWN stream, so with per-node streams
+  those indices named a different, untouched qubit: every Bell pair sent
+  across a node boundary arrived unentangled and every cat-entangle
+  teleported a |0>. Measured Bell correlation 0.500 (chance) versus 1.000 for
+  the core simulator. Fixed with a single shared `QStream` holding every data
+  qubit plus two communication ancillas per node.
+  Reproduce with `emulators/squanch/scripts/diagnose_squanch.py`.
+- **SQUANCH: communication ancilla never reset after measurement.** In
+  `_cat_disentangle_target` the token was measured but left in |1> half the
+  time, while the source correctly reset `b0`. The ancilla is reused per
+  control qubit, so from the second teleportation onwards `H; CNOT` prepared
+  |Phi-> instead of |Phi+>. Present independently of the channel defect, which
+  masked it entirely.
+- **SQUANCH: concurrent gate application on a shared qsystem.** `QSystem.apply`
+  does `state[...] = U @ state @ U.conj().T`, a non-atomic read-modify-write
+  of the whole density matrix; two agents corrupt each other even on disjoint
+  qubits. Blocks of gate applications are now guarded by a
+  `multiprocessing.Lock`, never held across a send/recv. Note this means the
+  agents no longer run in parallel in any meaningful sense; they take turns on
+  a shared state.
+
+### Added (continued)
+- `--comm_mode {basic,packed}` on SQUANCH, verified at fidelity 1.0 for both
+  modes at (n,k) = (4,2), theta = 0.0 and 0.5, with e-bits 2 (packed) and
+  4 (basic).
+- `--comm_mode` accepted (packed only) on SquidASM and CUNQA so the scaffolding
+  can pass the axis uniformly.
+- `tests/test_results_io.py`: 10 tests pinning the results-CSV contract, in
+  particular that runs differing only in communication schedule or error model
+  land on distinct paths. That collision is silent -- the second run
+  overwrites the first and the lost series looks like a job that never ran.
+
+### Known cost change
+- The corrected SQUANCH simulates the JOINT state: a dense density matrix of
+  side 2^(n_total + 2P). It will not reach the qubit counts previously
+  reported. Part of what made it appear to scale was that it was not modelling
+  inter-node entanglement at all. Figures must be regenerated and the reduced
+  range stated explicitly.
+
 ### Verified
 - Noiseless correctness, Qiskit Aer, theta = 0: fidelity 1.0 at
   (n,k) = (4,1), (4,2), (6,2), (6,3), (8,2), both comm modes.

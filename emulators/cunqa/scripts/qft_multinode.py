@@ -218,6 +218,13 @@ def main():
     parser.add_argument("--num_nodes", type=int, required=True)
     parser.add_argument("--theta", type=float, required=True)
     parser.add_argument("--shots", type=int, default=100)
+    parser.add_argument("--comm_mode", type=str, default="packed",
+                        choices=["packed"],
+                        help="Communication schedule. Only 'packed' is "
+                             "implemented: this script builds the "
+                             "packed-column construction explicitly. The flag "
+                             "exists so the job scaffolding can pass the axis "
+                             "uniformly to every emulator.")
     parser.add_argument("--max_time", type=str, default="00:20:00",
                         help="SLURM wall-clock budget for the vQPU allocation (D-HH:MM:SS)")
     args = parser.parse_args()
@@ -272,6 +279,7 @@ def main():
         theta=args.theta, shots=args.shots, execution_time=execution_time,
         current_kb=peak_kb, peak_kb=peak_kb,
         result=phases, algorithm="qft", fidelity=fidelity,
+        comm_mode=args.comm_mode,
     )
     print(f"Wrote {csv_file_path}")
     print(

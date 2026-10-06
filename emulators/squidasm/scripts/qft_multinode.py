@@ -319,6 +319,11 @@ if __name__ == "__main__":
     parser.add_argument('--num_nodes', type=int, required=True, help='Number of nodes')    
     parser.add_argument('--theta', type=float, required=True, help='Initial angle theta')
     parser.add_argument('--shots', type=int, required=True, help='Number of shots')
+    parser.add_argument('--comm_mode', type=str, default='packed',
+                        choices=['packed'],
+                        help="Communication schedule. Only 'packed' is "
+                             "implemented here so far; the flag exists so the "
+                             "job scaffolding can pass the axis uniformly.")
     
     # Parse the arguments
     args = parser.parse_args()
@@ -381,5 +386,6 @@ if __name__ == "__main__":
         theta=theta, shots=shots, execution_time=execution_time,
         current_kb=current / 1024, peak_kb=peak / 1024,
         result=sorted_counts, algorithm="qft", fidelity=fidelity,
+        comm_mode=args.comm_mode,
     )
     print(f"Wrote {csv_file_path}")

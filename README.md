@@ -66,8 +66,16 @@ DQC-Emulator-Benchmarking/
 │   │   ├── jobs/
 │   │   └── results/
 │   │
-│   └── squanch/
-│       ├── env/environment.yml
+│   ├── squanch/
+│   │   ├── env/environment.yml
+│   │   ├── scripts/
+│   │   │   └── qft_multinode.py
+│   │   ├── slurm_template_multinode.sh
+│   │   ├── jobs/
+│   │   └── results/
+│   │
+│   └── cunqa/                          # Not yet in the default sweep -- see note below
+│       ├── env/README.md               # CUNQA is built from source, not conda/pip
 │       ├── scripts/
 │       │   └── qft_multinode.py
 │       ├── slurm_template_multinode.sh
@@ -86,6 +94,18 @@ DQC-Emulator-Benchmarking/
 └── plots/
     ├── plot_results.py                # Parses CSVs and generates figures
 ```
+
+---
+
+## Emulator status
+
+| Emulator | In default sweep | Noise | Notes |
+|---|---|---|---|
+| Qiskit Aer | Yes | Yes | Reference / monolithic baseline |
+| SquidASM | Yes | Yes | NetSquid-based |
+| Interlin-q | Yes | Yes | `num_qubits` must be divisible by `num_nodes` |
+| SQUANCH | Yes | Yes | |
+| CUNQA | **Not yet** | **No** (quantum-comm path has no noise model upstream as of this writing) | Driver-process-only memory accounting; see `emulators/cunqa/scripts/qft_multinode.py` module docstring for full validation status before adding to the sweep |
 
 ---
 
@@ -142,6 +162,29 @@ points that are not valid distributed benchmarks:
 `job_creator.py` prints every skipped combination and the reason, so the
 exclusions are visible rather than silent. With the defaults above, 336 of the
 432 grid points are emitted.
+
+### Telegate packing ablation
+
+`emulators/qiskit_aer/scripts/qft_multinode.py` accepts `--telegate_baseline`,
+which switches the distributed ladder from the packed cat-comm construction
+(one Bell pair per column) to a naive baseline (one Bell pair per individual
+gate, no packing). Not part of the sweep grid — it's a separate, small
+comparison run producing `plots/ebit_packing_ablation.png`:
+
+```bash
+python emulators/qiskit_aer/scripts/qft_multinode.py \
+    --num_qubits 8 --num_nodes 2 --theta 0.33 --shots 100                     # packed (default)
+python emulators/qiskit_aer/scripts/qft_multinode.py \
+    --num_qubits 8 --num_nodes 2 --theta 0.33 --shots 100 --telegate_baseline # baseline
+```
+
+Both write to `emulators/qiskit_aer/results/`, distinguished by the
+`Algorithm` column (`qft` vs. `qft_telegate_baseline`) so they never mix into
+the main scaling figures. The `Ebits` column records the number of Bell pairs
+consumed. In the bipartite (2-node) case this fits exactly: packed = n/2,
+baseline = (n/2)², verified against hand-derived counts at n = 4, 6, 8, 10
+before being trusted (see `CHANGELOG.md`). The multi-node case has not yet had
+the same check.
 
 ### 2. Generate SLURM job scripts
 

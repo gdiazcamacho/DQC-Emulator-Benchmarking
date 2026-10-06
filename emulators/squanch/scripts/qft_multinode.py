@@ -2,6 +2,7 @@
 import logging
 import numpy as np
 import argparse
+import multiprocessing
 
 from typing import List
 from collections import Counter
@@ -57,9 +58,18 @@ def CRz(control, target, angle):
 
 # ---------- QFTNode ----------
 class QFTNode(Agent):
-    def __init__(self, qstream, out, *, name, peers, network_structure, theta, data_qubits, verbose=False):
+    def __init__(self, qstream, out, *, name, peers, network_structure, theta,
+                 data_qubits, comm_mode="packed", qsystem_lock=None, verbose=False):
         # DO NOT pass `verbose` to super()
         super().__init__(qstream, out, name=name)
+        self.comm_mode = comm_mode
+        # Gate application mutates the shared density matrix in place
+        # (QSystem.apply does `state[...] = U @ state @ U.conj().T`), which is
+        # a read-modify-write of the whole array and is NOT atomic. Two agents
+        # applying gates concurrently corrupt each other even on disjoint
+        # qubits, and SQUANCH does not serialise this. The lock guards blocks
+        # of gate applications and is never held across a send/recv.
+        self.qsystem_lock = qsystem_lock
         self.theta = theta
         self.network_structure = network_structure
         self.data_qubits = data_qubits
@@ -68,72 +78,135 @@ class QFTNode(Agent):
         self.peers = peers
         self.verbose = verbose  # just store it here
 
+    # Index layout inside the SINGLE shared qsystem:
+    #   [0 .. n_total)        data qubits, in node order
+    #   [n_total + 2i, +1]    node i's two communication ancillas
+    #
+    # All nodes address the SAME qsystem. SQUANCH's quantum channel transmits
+    # only a reference -- Qubit.serialize() returns (system_index,
+    # qubit_index) and the receiver resolves it against ITS OWN qstream via
+    # Qubit.from_stream. With one QStream per node those indices name a
+    # different, untouched qubit, so no entanglement can cross a node
+    # boundary: measured Bell correlation was 0.500, i.e. chance.
+    # See scripts/diagnose_squanch.py.
+
+    @property
+    def _n_total(self):
+        return sum(self.network_structure.values())
+
     def _my_local(self, qs):
-        return [qs.qubit(i) for i in range(self.data_qubits)]
+        base = self._g_offs[self.name]
+        return [qs.qubit(base + i) for i in range(self.data_qubits)]
 
     def _comm_pair(self, qs):
-        return qs.qubit(self.data_qubits), qs.qubit(self.data_qubits + 1)
+        base = self._n_total + 2 * self.index
+        return qs.qubit(base), qs.qubit(base + 1)
+
+    def _locked(self):
+        class _Null(object):
+            def __enter__(self_):
+                return None
+
+            def __exit__(self_, *exc):
+                return False
+        return self.qsystem_lock if self.qsystem_lock is not None else _Null()
 
     # Minimal CAT, no tags — enough for scaling study
     def _cat_entangle_source(self, q_ctrl, peer, b0, b1):
-        H(b0); CNOT(b0, b1)
+        with self._locked():
+            H(b0); CNOT(b0, b1)
         self.qsend(self._peer_obj[peer], b1)
-        CNOT(q_ctrl, b0)
-        x = b0.measure()
-        if x: X(b0)
+        with self._locked():
+            CNOT(q_ctrl, b0)
+            x = b0.measure()
+            if x: X(b0)          # reset to |0> for the next teleportation
         self.csend(self._peer_obj[peer], x)
         z = self.crecv(self._peer_obj[peer])
-        if z: Z(q_ctrl)
+        with self._locked():
+            if z: Z(q_ctrl)
         self.qrecv(self._peer_obj[peer])
 
     def _cat_entangle_target(self, peer):
         token = self.qrecv(self._peer_obj[peer])
         x = self.crecv(self._peer_obj[peer])
-        if x: X(token)
+        with self._locked():
+            if x: X(token)
         return token
 
     def _cat_disentangle_target(self, token, peer):
-        H(token)
-        z = token.measure()
+        with self._locked():
+            H(token)
+            z = token.measure()
+            if z:
+                # Reset to |0>. The ancilla is reused for the next control
+                # qubit; H+CNOT on a dirty |1> prepares |Phi-> instead of
+                # |Phi+>, silently corrupting every teleportation after the
+                # first. This was masked entirely while the channel carried no
+                # entanglement at all.
+                X(token)
         self.csend(self._peer_obj[peer], z)
         self.qsend(self._peer_obj[peer], token)
 
     def controlled_phase_gradient_source(self, local_qubits, peer, qs):
+        """Send this node's controls to a lower-index peer.
+
+        packed: one teleportation per control qubit (the whole column of gates
+                shares it).
+        basic:  one teleportation per cross-node gate. The peer's qubit count
+                is read from network_structure rather than negotiated, so the
+                extra mode adds no handshake and no deadlock surface.
+        """
         self.csend(self._peer_obj[peer], len(local_qubits))
         b0, b1 = self._comm_pair(qs)
         base = self._g_offs[self.name]
+        n_target = self.network_structure[peer]
         for k, q in enumerate(local_qubits):
             g_c = base + k
-            self.csend(self._peer_obj[peer], g_c)
-            self._cat_entangle_source(q, peer, b0, b1)
+            reps = 1 if self.comm_mode == "packed" else n_target
+            for _ in range(reps):
+                self.csend(self._peer_obj[peer], g_c)
+                self._cat_entangle_source(q, peer, b0, b1)
 
     def controlled_phase_gradient_target(self, local_qubits, peer):
         num_peer_qubits = self.crecv(self._peer_obj[peer])
         my_base = self._g_offs[self.name]
         for _ in range(num_peer_qubits):
-            g_c = self.crecv(self._peer_obj[peer])
-            token = self._cat_entangle_target(peer)
-            for j, q_t in enumerate(local_qubits):
-                g_t = my_base + j
-                if g_t < g_c:
-                    exp = g_c - g_t
-                    angle = -np.pi / (2 ** exp)
-                    CRz(token, q_t, angle)
-            self._cat_disentangle_target(token, peer)
+            if self.comm_mode == "packed":
+                g_c = self.crecv(self._peer_obj[peer])
+                token = self._cat_entangle_target(peer)
+                with self._locked():
+                    for j, q_t in enumerate(local_qubits):
+                        g_t = my_base + j
+                        if g_t < g_c:
+                            CRz(token, q_t, -np.pi / (2 ** (g_c - g_t)))
+                self._cat_disentangle_target(token, peer)
+            else:  # basic: one teleportation per gate
+                for j, q_t in enumerate(local_qubits):
+                    g_c = self.crecv(self._peer_obj[peer])
+                    token = self._cat_entangle_target(peer)
+                    g_t = my_base + j
+                    with self._locked():
+                        if g_t < g_c:
+                            CRz(token, q_t, -np.pi / (2 ** (g_c - g_t)))
+                    self._cat_disentangle_target(token, peer)
 
     def run(self):
         outputs = []
         for qs in self.qstream:
             local = self._my_local(qs)
-            fourier_state(local, self.theta, start_from=self._g_offs[self.name])
+            with self._locked():
+                fourier_state(local, self.theta,
+                              start_from=self._g_offs[self.name])
             for peer in reversed(self.peers):
                 if list(self.network_structure.keys()).index(peer) > self.index:
                     self.controlled_phase_gradient_target(local, peer)
-            inverse_QFT_local(local)
+            with self._locked():
+                inverse_QFT_local(local)
             for peer in self.peers:
                 if list(self.network_structure.keys()).index(peer) < self.index:
                     self.controlled_phase_gradient_source(local, peer, qs)
-            outputs.append([q.measure() for q in local])
+            with self._locked():
+                outputs.append([q.measure() for q in local])
         self.output(outputs)
 
     @property
@@ -141,7 +214,28 @@ class QFTNode(Agent):
         return list(self.network_structure.keys()).index(self.name)
 
 # ---------- Runner ----------
-def run_DQFT_squanch(theta, node_qubits, node_names, shots=1, verbose=False):
+def expected_ebits(node_qubits, comm_mode):
+    """Analytic e-bit cost. SQUANCH agents are separate processes, so a counter
+    incremented inside a node would not come back to the parent.
+
+        packed = m * C(M,2)              (one per control qubit, per peer node)
+        basic  = n^2 (M-1) / (2M)        (one per cross-node gate)
+    """
+    sizes = list(node_qubits)
+    n = sum(sizes)
+    owner, acc = {}, 0
+    for node_i, size in enumerate(sizes):
+        for j in range(size):
+            owner[acc + j] = node_i
+        acc += size
+    if comm_mode == "basic":
+        return sum(1 for c in range(n) for t in range(c) if owner[c] != owner[t])
+    return sum(len({owner[t] for t in range(c) if owner[t] != owner[c]})
+               for c in range(n))
+
+
+def run_DQFT_squanch(theta, node_qubits, node_names, shots=1, verbose=False,
+                     comm_mode="packed"):
     """
     Run multinode D-QFT on Squanch and return per-node shot matrices,
     matching Squidasm's run_DQFT return format.
@@ -154,18 +248,30 @@ def run_DQFT_squanch(theta, node_qubits, node_names, shots=1, verbose=False):
     network = {name: nq for name, nq in zip(node_names, node_qubits)}
     P = len(node_names)
 
-    # Each node gets: data + 2 comm ancillas
-    per_node_qubits = [nq + 2 for nq in node_qubits]
-    qstreams = [QStream(per_node_qubits[i], shots) for i in range(P)]
+    # ONE shared QStream. Every data qubit plus two communication ancillas per
+    # node live in the SAME qsystem, which is what makes an inter-node Bell
+    # pair representable at all: SQUANCH's channel passes (system_index,
+    # qubit_index) and the receiver resolves it against its own stream, so with
+    # per-node streams the reference names an untouched qubit.
+    #
+    # Cost: the qsystem is a DENSE density matrix of side 2^(n_total + 2P), so
+    # memory and time grow with the total system, not per node. The previous
+    # per-node-QStream version was cheap precisely because it was not
+    # simulating the joint state.
+    system_size = sum(node_qubits) + 2 * P
+    shared_stream = QStream(system_size, shots)
+    qsystem_lock = multiprocessing.Lock()
     out = Agent.shared_output()
 
     # Build agents
     nodes = {
         name: QFTNode(
-            qstreams[i], out,
+            shared_stream, out,
             name=name,
             peers=[n for n in node_names if n != name],
             network_structure=network,
+            comm_mode=comm_mode,
+            qsystem_lock=qsystem_lock,
             theta=theta,
             data_qubits=node_qubits[i],
             verbose=verbose,   # OK: consumed by QFTNode, not forwarded
@@ -199,7 +305,12 @@ if __name__ == "__main__":
     parser.add_argument('--num_nodes', type=int, required=True, help='Number of nodes')    
     parser.add_argument('--theta', type=float, required=True, help='Initial angle theta')
     parser.add_argument('--shots', type=int, required=True, help='Number of shots')
-    
+    parser.add_argument('--comm_mode', type=str, default='packed',
+                        choices=['basic', 'packed'],
+                        help="Communication schedule. 'packed' shares one "
+                             "teleportation across a whole column of gates; "
+                             "'basic' uses one per cross-node gate.")
+
     # Parse the arguments
     args = parser.parse_args()
     
@@ -222,8 +333,10 @@ if __name__ == "__main__":
         theta,
         node_qubits=node_qubits,
         node_names=node_names,
-        shots=shots
+        shots=shots,
+        comm_mode=args.comm_mode,
     )
+    ebits_used = expected_ebits(node_qubits, args.comm_mode)
     
     execution_time = time.time() - start_time  # Calculate execution time
     current, peak = tracemalloc.get_traced_memory()  # Get memory usage
@@ -253,5 +366,6 @@ if __name__ == "__main__":
         theta=theta, shots=shots, execution_time=execution_time,
         current_kb=current / 1024, peak_kb=peak / 1024,
         result=sorted_counts, algorithm="qft", fidelity=fidelity,
+        ebits=ebits_used, comm_mode=args.comm_mode, noise="none",
     )
     print(f"Wrote {csv_file_path}")
