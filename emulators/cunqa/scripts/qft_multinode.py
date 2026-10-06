@@ -1,291 +1,474 @@
 """
-Distributed inverse QFT on CUNQA.
+Distributed inverse QFT on CUNQA (github.com/CESGA-Quantum-Spain/cunqa, 3.0.0).
 
-Follows the same packed-column construction as the other emulators in this
-suite (see emulators/qiskit_aer/scripts/qft_multinode.py): qubits are
-partitioned across `num_nodes` vQPUs; each node prepares its share of the
-Fourier state locally; the ladder of controlled-phase rotations is then
-applied node-by-node in descending order, with rotations that cross a node
-boundary carried out via a telegate.
+Same benchmark as the other emulator scripts: qubits are partitioned across
+`num_nodes` vQPUs (common.dqc_common.distribute_qubits), every node prepares
+its share of the Fourier state locally, and the inverse-QFT ladder runs node
+by node in descending order. What differs between comm modes is only how a
+controlled-phase rotation that crosses a node boundary is realised:
 
-CUNQA's cat_entangler/cat_disentangler *are* your cat-entangle/cat-disentangle
-primitive under a different name -- the entangler shares one control qubit
-onto the comm qubits of every node named in `target_circuits` in a single
-round, which is exactly the packed-column construction: a single entangling
-round serving every remote target rotation in that column, rather than one
-round per target. This script relies on that to reproduce the O(n) (not
-O(n^2)) e-bit scaling already established for the other backends.
+  packed   quantum_comm. One telegate per control qubit, shared with EVERY
+           lower node at once: cat_entangler over [control node, *lower nodes]
+           (one GHZ round = R e-bits for R receivers), all the column's `cp`
+           gates applied locally on the receivers' comm qubits, then
+           cat_disentangler. E-bits = sum_i size_i * i.
+  basic    quantum_comm. One two-party telegate per individual cross-node gate.
+           E-bits = number of cross-node controlled-phase gates.
+  dynamic  classical_comm, zero e-bits. Semiclassical (deferred-measurement)
+           inverse QFT: each qubit is measured right after its Hadamard and
+           every later rotation it controlled becomes a classically
+           conditioned phase `cif(bit) p(angle) endcif` on the target node,
+           the bit travelling with send/recv. Valid ONLY because the transform
+           is terminal (job_creator.DYNAMIC_ONLY_FOR). Same pattern as the
+           iterative QPE of CUNQA's examples/cl_comm/03 and chapter 20.3 of the
+           QCE26 tutorial. The Fourier input is a product state, so no
+           entanglement ever needs to cross a node.
 
-IMPORTANT -- validation status: this script is written against the CUNQA
-1.x API (github.com/CESGA-Quantum-Spain/cunqa, read as of 2026-08-07) but has
-not yet been run against a live deployment. Before it is trusted for the
-sweep, follow the suite's layered validation approach:
-  1. Run the 2-qubit / 2-node case and check the output distribution by hand.
-  2. Cross-check against the noiseless Qiskit Aer distribution for the same
-     (num_qubits, theta) at a matched partition.
-  3. Only then fold into the full sweep.
+Primitive equivalence (stated once, used everywhere below): this suite's
+cat_entangle / cat_disentangle == CUNQA's qc_protocols.cat_entangler /
+cat_disentangler == NetQMPI's expose / unexpose (QCE26 tutorial, ch. 23.3:
+"expose = gen_ent over N circuits, then cat_entangler"). A packed column is
+one expose window with every lower node as receiver.
 
-Known gaps versus the other four scripts (see CHANGELOG.md / PR description):
-  - No in-process memory hook: CUNQA's Result object carries counts and
-    time_taken, not memory. Peak/current memory here are measured on the
-    *driver* process only (this script's own resource.getrusage), which does
-    NOT include the vQPU server processes qraise spawns. This is a real
-    methodology difference from the other four scripts (which measure the
-    simulation process itself) and should be disclosed as such in Methods,
-    not silently treated as comparable.
-  - Noise: CUNQA's noise model is currently wired up for the no-communication
-    scheme only (confirmed by reading the backend JSON schemas, not just the
-    docs). A `--backend` noise config passed here would be accepted by qraise
-    but silently not applied to the quantum-communication path as of the
-    version read. Do not use this script for the Phase 3 noise sweep until
-    that changes upstream; noiseless comparison only.
-  - Execution model: qraise/qdrop happen once per run (one vQPU family per
-    benchmark point), matching the per-run SLURM-job model the other four
-    scripts use, at the cost of the amortization CUNQA is normally used for.
+CUNQA 3.0.0 behaviour this script depends on (read from src/, not the docs):
 
-  - Result correlation across nodes (resolved below, but worth recording why
-    it needed a workaround): each `Result.counts` is a per-circuit histogram
-    aggregated over shots -- confirmed by reading result.py, which builds
-    `counts` straight from one circuit's own classical register. Reading the
-    C++ executor (src/sim/backends/quantum_comm/qc_executor.cpp) confirms the
-    underlying shot loop *is* correlated -- one shared simulator steps every
-    node through the same shot before moving to the next -- but that pairing
-    is not exposed back through the Python API as a joint bitstring. Two
-    independent per-node marginal histograms cannot be recombined into the
-    joint distribution the fidelity metric needs, since the nodes' final
-    measurement outcomes are entangled, not independent.
+  1. Default backends are tiny: quantum_comm declares (2 data, 1 comm) qubits,
+     classical_comm (6, 0), and `run` rejects larger circuits. A backend JSON
+     with "num_qubits": [max node size, comm qubits] is therefore written per
+     run and passed to qraise.
+  2. Quantum communication runs ONE centralized statevector over all data and
+     comm qubits of all vQPUs. Memory is requested from the global size, not
+     the per-node size (tutorial ch. 17 warns about exactly this).
+  3. Counts are per circuit. There is no joint distribution across vQPUs.
+     The fidelity metric needs the joint one, so every non-zero node relays
+     its measured bits to node 0 with send/recv (dynamic mode gets them for
+     free: node 0 already receives every higher bit for its corrections).
+  4. A received bit is NOT reported in counts: quantum_comm marks it
+     save=False, classical_comm never marks it saved. So node 0 re-measures
+     each relayed bit through a scratch data qubit: cif(b) x(r); measure(r, b);
+     cif(b) x(r). Without this, node 0's counts silently contain only its own
+     qubits (the bug in the previous version of this script).
+  5. Counts keys hold only saved clbits, highest index leftmost. Node 0's saved
+     bits are exactly the data region [scratch, scratch+N), with global qubit
+     g at clbit scratch+g, so reversing the key gives global qubit order with
+     qubit 0 most significant -- the same convention as the Qiskit Aer script
+     after classical_reverse().
+  6. Telegate scratch clbits: cat_disentangler receives one correction bit per
+     receiver into distinct clbits on the control node, so the scratch region
+     is num_nodes bits wide. The previous fixed width of 2 overflowed the
+     register at every 8-node sweep point.
+  7. No noise on the communication paths (backend noise only applies to the
+     no-communication scheme): this script is noiseless only, Noise="none".
 
-    Fix: rather than measuring locally on every node, every non-zero node
-    classically relays its measured bits to node 0 with `send`/`recv` -- the
-    same primitive `cat_entangler` itself uses for its correction bits, and
-    it executes inside the same per-shot lockstep loop, so the pairing is
-    exact. Node 0 ends up holding the full global bitstring for every shot in
-    one classical register, and `results[0].counts` is directly the joint
-    distribution. This costs classical bits only, no extra e-bits, and is
-    counted separately from the ladder's own communication cost.
+Measured quantities, and how they differ from the other emulators (disclose
+in Methods):
+  * Execution Time: wall clock of run()+gather(), excluding qraise/qdrop
+    queueing. CUNQA's own per-circuit `time_taken` is printed for reference.
+  * Peak Memory: the DRIVER process only (resource.getrusage). The simulation
+    runs inside the vQPU/executor processes of the qraise allocation, which
+    tracemalloc cannot see. Use `seff` on the qraise job for the real figure.
+  * Fidelity: noiseless, so it is a correctness check, not a noise result.
+
+Validation: `--shadow` runs the identical circuits on cunqa_shadow.py (NumPy,
+no deployment) and prints fidelity and e-bits without writing a CSV. Do this
+first; then on the cluster run 4 qubits / 2 nodes per mode at a
+non-palindromic theta and compare against noiseless Qiskit Aer before
+submitting the sweep.
 """
 
 import argparse
+import json
+import math
 import os as _os
 import resource
 import sys as _sys
+import tempfile
 import time
+import uuid
 
 import numpy as np
 
 # --- shared helpers -----------------------------------------------------------
-_REPO_ROOT = _os.path.abspath(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", ".."))
+_SCRIPT_DIR = _os.path.dirname(_os.path.abspath(__file__))
+_REPO_ROOT = _os.path.abspath(_os.path.join(_SCRIPT_DIR, "..", "..", ".."))
 if _REPO_ROOT not in _sys.path:
     _sys.path.insert(0, _REPO_ROOT)
 from common.dqc_common import distribute_qubits, fidelity_from_counts, write_result_row
 # ------------------------------------------------------------------------------
 
-# cunqa is only importable on a CESGA login/compute node with the module
-# installed under $HOME (see README). Imported lazily so the rest of the suite
-# (tests, plotting) does not require it.
+# cunqa is installed under $HOME on CESGA systems (as in its own examples).
 _sys.path.append(_os.getenv("HOME", ""))
 
+CUNQA_COMM_MODES = ("packed", "basic", "dynamic")
+QUANTUM_MODES = ("packed", "basic")
 
-def myqft_inverse_local(circuit, qubits, swap_qubits=False):
-    """Apply the local (single-node) part of the inverse QFT to `qubits`.
 
-    Mirrors emulators/qiskit_aer/scripts/qft_multinode.py::myqft_inverse.
-    Uses `cp`, not `crz` -- the inverse QFT is built from controlled-PHASE
-    gates. CunqaCircuit exposes both as distinct methods (same trap as
-    Qiskit), so this is stated explicitly rather than left implicit.
-    """
-    n = len(qubits)
-    for j in range(n - 1, -1, -1):
-        circuit.h(qubits[j])
+# --------------------------------------------------------------------------- #
+# Circuit construction
+# --------------------------------------------------------------------------- #
+
+class Layout:
+    """Qubit/clbit bookkeeping shared by builder, decoder and tests."""
+
+    def __init__(self, node_sizes, comm_mode):
+        if comm_mode not in CUNQA_COMM_MODES:
+            raise ValueError("comm_mode %r not in %s" % (comm_mode, CUNQA_COMM_MODES))
+        self.sizes = list(node_sizes)
+        self.num_nodes = len(node_sizes)
+        self.num_qubits = sum(node_sizes)
+        self.comm_mode = comm_mode
+        self.quantum = comm_mode in QUANTUM_MODES
+        self.comm_per_node = 1 if self.quantum else 0
+        # clbits [0, scratch): telegate corrections; [scratch, scratch+N): data
+        self.scratch = self.num_nodes if self.quantum else 0
+        self.num_clbits = self.scratch + self.num_qubits
+        self.first = np.cumsum([0] + self.sizes[:-1]).tolist()   # global index of each node's qubit 0
+
+    def node_of(self, g):
+        for i in range(self.num_nodes - 1, -1, -1):
+            if g >= self.first[i]:
+                return i
+        raise ValueError(g)
+
+    def global_qubits(self, node):
+        return list(range(self.first[node], self.first[node] + self.sizes[node]))
+
+    def clbit(self, g):
+        return self.scratch + g
+
+    def expected_ebits(self):
+        if self.comm_mode == "dynamic":
+            return 0
+        if self.comm_mode == "packed":
+            return sum(self.sizes[i] * i for i in range(self.num_nodes))
+        return sum(self.sizes[i] * sum(self.sizes[:i]) for i in range(self.num_nodes))
+
+    def statevector_qubits(self):
+        """Qubits in CUNQA's simulated state: global for quantum_comm, largest
+        node for classical_comm (each vQPU simulates only itself)."""
+        if self.quantum:
+            return self.num_qubits + self.num_nodes * self.comm_per_node
+        return max(self.sizes)
+
+
+def _angle(control_g, target_g):
+    # Inverse-QFT controlled-phase angle between global qubits (control > target).
+    return -np.pi / 2 ** (control_g - target_g)
+
+
+def _local_inverse_qft(circuit, layout, node):
+    """Local part of the ladder on one node. Mirrors myqft_inverse() in the
+    Qiskit Aer script; `cp`, not `crz` (see CHANGELOG, phase 1)."""
+    gs = layout.global_qubits(node)
+    for j in range(len(gs) - 1, -1, -1):
+        circuit.h(j)
         for k in range(j - 1, -1, -1):
-            angle = -np.pi / 2 ** (j - k)
-            circuit.cp(angle, qubits[k], qubits[j])
-    if swap_qubits:
-        for i in range(n // 2):
-            circuit.swap(qubits[i], qubits[n - 1 - i])
+            circuit.cp(_angle(gs[j], gs[k]), k, j)
 
 
-def build_distributed_iqft(node_sizes, theta):
-    """Build one CunqaCircuit per node implementing the packed-column
-    distributed inverse QFT.
+def _rematerialise(circuit, readout_qubit, clbit):
+    """Turn a received (hence unsaved) bit into a saved measurement.
 
-    Returns (circuits, node0_global_clbits) where circuits[i] is the
-    CunqaCircuit for node i, and node0_global_clbits gives the classical bit
-    index on node 0 holding each global qubit's measurement outcome, in
-    global-qubit order (0 = most significant, matching distribute_qubits'
-    node ordering). Every node measures its own data qubits locally; every
-    non-zero node then classically relays its bits to node 0 (see module
-    docstring), so results[0].counts is the joint distribution directly.
+    readout_qubit must be in |0>; it is returned to |0>. See docstring item 4.
     """
+    circuit.cif(clbit)
+    circuit.x(readout_qubit)
+    circuit.endcif()
+    circuit.measure(readout_qubit, clbit)          # save=True
+    circuit.cif(clbit)
+    circuit.x(readout_qubit)
+    circuit.endcif()
+
+
+def build_circuits(node_sizes, theta, comm_mode):
+    """Return (circuits, layout, ebits). circuits[i] runs on vQPU i."""
     from cunqa.circuit import CunqaCircuit
-
-    num_nodes = len(node_sizes)
-    num_qubits = sum(node_sizes)
-
-    # Clbit budget per node:
-    #   [0, 1)              -- reused scratch bits for telegate corrections
-    #                          during the ladder (2 bits; telegate blocks are
-    #                          processed sequentially so reuse is safe)
-    #   node 0 only: [2, 2 + num_qubits) -- final joint bitstring
-    #   node i>0:    [2, 2 + node_sizes[i]) -- local measurement, then relayed
-    TELEGATE_SCRATCH = 2
-    circuits = []
-    for i, size in enumerate(node_sizes):
-        n_clbits = TELEGATE_SCRATCH + (num_qubits if i == 0 else size)
-        circuits.append(CunqaCircuit((size, 1), num_clbits=n_clbits, id=f"node_{i}"))
-
-    data_qubits, comm_qubits = [], []
-    for c in circuits:
-        d, cm = c.get_qubits()
-        data_qubits.append(d)
-        comm_qubits.append(cm)
-
-    # 1. Local state preparation: fourier_state(theta) on every physical qubit,
-    #    numbered globally 0..N-1 in node order (matches distribute_qubits).
-    global_index = 0
-    for node, size in enumerate(node_sizes):
-        for local_q in range(size):
-            circuits[node].h(data_qubits[node][local_q])
-            circuits[node].rz(theta * 2 * np.pi * 2 ** global_index, data_qubits[node][local_q])
-            global_index += 1
-
-    # 2. Packed-column ladder, descending node order (mirrors
-    #    recursive_qft_telegate in the Qiskit script).
     from cunqa.qc_protocols import cat_entangler, cat_disentangler
 
-    for i in range(num_nodes - 1, -1, -1):
-        control_circuit = circuits[i]
-        control_qubits = data_qubits[i]
+    L = Layout(node_sizes, comm_mode)
+    M = L.num_nodes
+    token = uuid.uuid4().hex[:8]                    # CunqaCircuit ids are process-global
+    shape = (lambda s: (s, 1)) if L.quantum else (lambda s: s)
+    circs = [CunqaCircuit(shape(s), L.num_clbits, id="dqft_%s_n%d" % (token, i))
+             for i, s in enumerate(L.sizes)]
+    comm = [c.get_qubits()[1][0] if L.quantum else None for c in circs]
+    ebits = 0
 
-        # local column within the control node
-        myqft_inverse_local(control_circuit, control_qubits, swap_qubits=False)
+    # 1. Fourier-state preparation (common to all modes; matches fourier_state()).
+    for i in range(M):
+        for j, g in enumerate(L.global_qubits(i)):
+            circs[i].h(j)
+            circs[i].rz(theta * 2 * np.pi * 2 ** g, j)
 
-        target_nodes = list(range(i - 1, -1, -1))
-        if not target_nodes:
-            continue
+    if L.quantum:
+        # 2a. Distributed ladder with telegates, highest node first.
+        for i in range(M - 1, -1, -1):
+            _local_inverse_qft(circs[i], L, i)
+            lower = list(range(i - 1, -1, -1))
+            if not lower:
+                continue
+            for lj, gc in enumerate(L.global_qubits(i)):
+                if comm_mode == "packed":
+                    # One expose window: control lent to every lower node at once.
+                    block = [circs[i]] + [circs[t] for t in lower]
+                    cat_entangler(block, lj, [comm[i]] + [comm[t] for t in lower],
+                                  [0] * (1 + len(lower)), tag="pk_%s_%d_%d" % (token, i, lj))
+                    for t in lower:
+                        for lk, gt in enumerate(L.global_qubits(t)):
+                            circs[t].cp(_angle(gc, gt), comm[t], lk)
+                    cat_disentangler(block, lj, [comm[t] for t in lower],
+                                     list(range(1, len(lower) + 1)), [0] * len(lower))
+                    ebits += len(lower)
+                else:  # basic: one fresh two-party telegate per gate
+                    for t in lower:
+                        for lk, gt in enumerate(L.global_qubits(t)):
+                            pair = [circs[i], circs[t]]
+                            cat_entangler(pair, lj, [comm[i], comm[t]], [0, 0],
+                                          tag="bs_%s_%d_%d_%d_%d" % (token, i, lj, t, lk))
+                            circs[t].cp(_angle(gc, gt), comm[t], lk)
+                            cat_disentangler(pair, lj, [comm[t]], [1], [0])
+                            ebits += 1
 
-        for local_j, control_qubit in enumerate(control_qubits):
-            remote_nodes = target_nodes
-            block = [control_circuit] + [circuits[t] for t in remote_nodes]
-            block_comm = [comm_qubits[i][0]] + [comm_qubits[t][0] for t in remote_nodes]
-            clbits = [0] * (1 + len(remote_nodes))
+        # 3a. Measure locally; relay every non-zero node's bits to node 0.
+        for i in range(M):
+            for j, g in enumerate(L.global_qubits(i)):
+                circs[i].measure(j, L.clbit(g))
+        for t in range(1, M):
+            for g in L.global_qubits(t):
+                circs[t].send(L.clbit(g), circs[0])
+                circs[0].recv(L.clbit(g), circs[t])
+        relayed = [g for t in range(1, M) for g in L.global_qubits(t)]
 
-            cat_entangler(block, control_qubit, block_comm, clbits, tag=f"col_{i}_{local_j}")
+    else:
+        # 2b. Semiclassical ladder. Node i first receives every bit of every
+        # higher node (each sender emits in descending global order, so the
+        # per-pair FIFO order matches), then processes its own qubits from the
+        # highest down: corrections, H, measure, broadcast to lower nodes.
+        for i in range(M - 1, -1, -1):
+            for h in range(M - 1, i, -1):
+                for g in reversed(L.global_qubits(h)):
+                    circs[i].recv(L.clbit(g), circs[h])
+            gs = L.global_qubits(i)
+            for lj in range(len(gs) - 1, -1, -1):
+                gj = gs[lj]
+                for gk in range(L.num_qubits - 1, gj, -1):     # every higher qubit
+                    circs[i].cif(L.clbit(gk))
+                    circs[i].p(_angle(gk, gj), lj)
+                    circs[i].endcif()
+                circs[i].h(lj)
+                circs[i].measure(lj, L.clbit(gj))
+                for t in range(i - 1, -1, -1):
+                    circs[i].send(L.clbit(gj), circs[t])
+        # node 0 already holds every higher bit (unsaved).
+        relayed = [g for t in range(1, M) for g in L.global_qubits(t)]
 
-            for t in remote_nodes:
-                for local_k, target_qubit in enumerate(data_qubits[t]):
-                    global_target = sum(node_sizes[:t]) + local_k
-                    global_control = sum(node_sizes[:i]) + local_j
-                    angle = -np.pi / 2 ** (global_control - global_target)
-                    circuits[t].cp(angle, comm_qubits[t][0], target_qubit)
+    # 4. Node 0: free a data qubit (qubit 0, already measured) and use it to
+    #    re-materialise every relayed bit as a saved measurement.
+    if relayed:
+        r = 0
+        c0 = L.clbit(L.global_qubits(0)[0])
+        circs[0].cif(c0)
+        circs[0].x(r)
+        circs[0].endcif()
+        for g in relayed:
+            _rematerialise(circs[0], r, L.clbit(g))
 
-            cat_disentangler(
-                block, control_qubit,
-                [comm_qubits[t][0] for t in remote_nodes],
-                list(range(1, len(remote_nodes) + 1)),
-                [0] * len(remote_nodes),
-            )
-
-    # 3. Local measurement, then classical relay of every non-zero node's
-    #    bits into node 0's classical register (see module docstring).
-    node0_global_clbits = [None] * num_qubits
-    global_index = 0
-    for node, size in enumerate(node_sizes):
-        local_clbits = list(range(TELEGATE_SCRATCH, TELEGATE_SCRATCH + size))
-        circuits[node].measure(data_qubits[node], local_clbits)
-
-        if node == 0:
-            for local_c, clbit in enumerate(local_clbits):
-                node0_global_clbits[global_index + local_c] = clbit
-        else:
-            # Relay each bit to a fresh clbit on node 0, appended after the
-            # bits already claimed there.
-            for local_c, clbit in enumerate(local_clbits):
-                dest = TELEGATE_SCRATCH + node_sizes[0] + sum(
-                    node_sizes[1:node]) + local_c
-                circuits[node].send([clbit], circuits[0])
-                circuits[0].recv([dest], circuits[node])
-                node0_global_clbits[global_index + local_c] = dest
-
-        global_index += size
-
-    return circuits, node0_global_clbits
+    return circs, L, ebits
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Distributed inverse QFT on CUNQA.")
-    parser.add_argument("--num_qubits", type=int, required=True)
-    parser.add_argument("--num_nodes", type=int, required=True)
-    parser.add_argument("--theta", type=float, required=True)
-    parser.add_argument("--shots", type=int, default=100)
-    parser.add_argument("--comm_mode", type=str, default="packed",
-                        choices=["packed"],
-                        help="Communication schedule. Only 'packed' is "
-                             "implemented: this script builds the "
-                             "packed-column construction explicitly. The flag "
-                             "exists so the job scaffolding can pass the axis "
-                             "uniformly to every emulator.")
-    parser.add_argument("--max_time", type=str, default="00:20:00",
-                        help="SLURM wall-clock budget for the vQPU allocation (D-HH:MM:SS)")
-    args = parser.parse_args()
+# --------------------------------------------------------------------------- #
+# Decoding
+# --------------------------------------------------------------------------- #
 
-    node_sizes = distribute_qubits(args.num_qubits, args.num_nodes)
+def decode_joint(counts0, layout):
+    """Node-0 counts -> {phase value: count}, qubit 0 most significant."""
+    phases = {}
+    N = layout.num_qubits
+    for key, n in counts0.items():
+        bits = key.replace(" ", "")
+        if len(bits) != N:
+            raise RuntimeError(
+                "node-0 count key %r has %d bits, expected %d: the saved-clbit "
+                "layout is not what decode_joint assumes" % (key, len(bits), N))
+        ordered = bits[::-1]                      # char g == global qubit g
+        val = int(ordered, 2) / 2 ** N
+        phases[val] = phases.get(val, 0) + n
+    return phases
 
+
+def marginal_mismatch(all_counts, layout):
+    """Total-variation distance between each node's own counts and the
+    marginal of the joint distribution on its qubits. Same shots, so this is
+    zero up to nothing at all when the relay pairs shots correctly."""
+    joint = all_counts[0]
+    worst = 0.0
+    shots = float(sum(joint.values()))
+    for t in range(1, layout.num_nodes):
+        gs = layout.global_qubits(t)
+        marg = {}
+        for key, n in joint.items():
+            ordered = key.replace(" ", "")[::-1]
+            sub = "".join(ordered[g] for g in gs)
+            marg[sub] = marg.get(sub, 0) + n
+        own = {}
+        for key, n in all_counts[t].items():
+            sub = key.replace(" ", "")[::-1]
+            own[sub] = own.get(sub, 0) + n
+        keys = set(marg) | set(own)
+        tv = 0.5 * sum(abs(marg.get(k, 0) - own.get(k, 0)) for k in keys) / shots
+        worst = max(worst, tv)
+    return worst
+
+
+# --------------------------------------------------------------------------- #
+# Execution
+# --------------------------------------------------------------------------- #
+
+def default_mem_per_qpu_gb(layout):
+    """Memory per vQPU in GB. quantum_comm: every vQPU is given room for the
+    GLOBAL statevector (16 B/amplitude, x3 for simulator workspace), because
+    the centralized executor's placement inside the allocation is not under
+    our control. classical_comm: per-node state only."""
+    amp_bytes = 16 * 2 ** layout.statevector_qubits()
+    return max(2, int(math.ceil(3 * amp_bytes / 1e9)) + 1)
+
+
+def estimate_seconds(circuits, layout, shots, ns_per_amp_op=2.0):
+    """Crude single-thread cost model: shots x quantum ops x 2^statevector
+    qubits x ~2 ns. Only used to size the qraise wall-clock budget. Under
+    quantum_comm the centralized executor steps ONE global state for every
+    shot, so the 8-node, 18-20-qubit points are hours, not minutes."""
+    ops = sum(1 for c in circuits for i in c.instructions
+              if i["name"] not in ("send", "recv", "cif", "endcif"))
+    if not layout.quantum:
+        ops = max(ops // max(layout.num_nodes, 1), 1)   # vQPUs run concurrently
+    return shots * ops * 2 ** layout.statevector_qubits() * ns_per_amp_op * 1e-9
+
+
+def default_max_time(est_seconds):
+    """qraise budget: 3x the estimate + 10 min, clamped to [30 min, 2 days]."""
+    secs = int(min(max(3 * est_seconds + 600, 1800), 2 * 86400))
+    d, rem = divmod(secs, 86400)
+    h, rem = divmod(rem, 3600)
+    return "%d-%02d:%02d:00" % (d, h, rem // 60)
+
+
+def write_backend_json(layout):
+    bdir = _os.path.join(_SCRIPT_DIR, "..", "backends")
+    _os.makedirs(bdir, exist_ok=True)
+    fd, path = tempfile.mkstemp(prefix="dqft_", suffix=".json", dir=bdir)
+    with _os.fdopen(fd, "w") as fh:
+        json.dump({
+            "name": "dqc-benchmark-%s" % layout.comm_mode,
+            "description": "Generated by DQC-Emulator-Benchmarking for one run",
+            "num_qubits": [max(layout.sizes), layout.comm_per_node],
+        }, fh)
+    return _os.path.abspath(path)
+
+
+def run_on_cunqa(circuits, layout, shots, max_time, mem_per_qpu, seed=None):
     from cunqa.qpu import get_QPUs, qraise, qdrop, run
     from cunqa.qjob import gather
 
-    family = qraise(
-        args.num_nodes, args.max_time,
-        quantum_comm=True, simulator="Aer", co_located=True,
-    )
+    backend = write_backend_json(layout)
     try:
-        qpus = get_QPUs(co_located=True, family=family)
-        circuits, node0_global_clbits = build_distributed_iqft(node_sizes, args.theta)
-
-        start = time.time()
-        qjobs = run(circuits, qpus, shots=args.shots)
-        results = gather(qjobs)
-        execution_time = time.time() - start
-
-        # results[0].counts keys are node 0's full classical register as one
-        # contiguous bitstring (see Result.counts docstring: a single
-        # register is not space-separated). node0_global_clbits gives the
-        # position of each global qubit's bit within that string.
-        #
-        # BIT ORDER IS UNVERIFIED. The other four scripts in this suite each
-        # needed their own reversal fix at some point (classical_reverse() in
-        # the Qiskit script exists for exactly this reason -- see also the
-        # "palindrome targets mask ordering bugs" entry in the project notes).
-        # This line assumes CunqaCircuit reports classical bit `c` at string
-        # index `c`; do not trust it until validation step 1 (a small,
-        # non-palindromic theta, checked by hand) confirms it on-cluster.
-        raw_counts = results[0].counts
-        phases = {}
-        for bitstring, count in raw_counts.items():
-            ordered_bits = "".join(bitstring[c] for c in node0_global_clbits)
-            val = int(ordered_bits, 2) / 2 ** args.num_qubits
-            phases[val] = phases.get(val, 0) + count
-
+        family = qraise(
+            layout.num_nodes, max_time,
+            quantum_comm=layout.quantum, classical_comm=not layout.quantum,
+            simulator="Aer", co_located=True, backend=backend,
+            mem_per_qpu=mem_per_qpu,
+        )
+        try:
+            qpus = get_QPUs(co_located=True, family=family)
+            kwargs = {"shots": shots}
+            if seed is not None:
+                kwargs["seed"] = seed
+            start = time.time()
+            results = gather(run(circuits, qpus, **kwargs))
+            elapsed = time.time() - start
+        finally:
+            qdrop(family)
     finally:
-        qdrop(family)
+        try:
+            _os.remove(backend)
+        except OSError:
+            pass
+    counts = [dict(r.counts) for r in results]
+    taken = [r.time_taken for r in results]
+    return counts, elapsed, taken
 
-    peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # driver process only; see module docstring
 
+def run_on_shadow(circuits, layout, shots, seed=None):
+    from cunqa_shadow import run_shadow
+    start = time.time()
+    counts, stats = run_shadow(circuits, shots,
+                               comm="quantum" if layout.quantum else "classical",
+                               seed=seed)
+    return [dict(c) for c in counts], time.time() - start, stats
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Distributed inverse QFT on CUNQA.")
+    ap.add_argument("--num_qubits", type=int, required=True)
+    ap.add_argument("--num_nodes", type=int, required=True)
+    ap.add_argument("--theta", type=float, required=True)
+    ap.add_argument("--shots", type=int, default=100)
+    ap.add_argument("--comm_mode", choices=CUNQA_COMM_MODES, default="packed")
+    ap.add_argument("--noise", choices=["none"], default="none",
+                    help="CUNQA applies no noise on communication paths; accepted "
+                         "only so the scaffolding can pass the axis uniformly.")
+    ap.add_argument("--max_time", default=None,
+                    help="qraise wall-clock budget D-HH:MM:SS (default: from "
+                         "estimate_seconds, clamped to [30 min, 2 days])")
+    ap.add_argument("--mem_per_qpu", type=int, default=None,
+                    help="GB per vQPU (default: from the global statevector size)")
+    ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--shadow", action="store_true",
+                    help="Run on the offline NumPy shadow executor; writes no CSV.")
+    args = ap.parse_args()
+
+    sizes = distribute_qubits(args.num_qubits, args.num_nodes)
+    circuits, layout, ebits = build_circuits(sizes, args.theta, args.comm_mode)
+    if ebits != layout.expected_ebits():
+        raise RuntimeError("e-bit count %d != closed form %d" % (ebits, layout.expected_ebits()))
+    mem = args.mem_per_qpu or default_mem_per_qpu_gb(layout)
+    est = estimate_seconds(circuits, layout, args.shots)
+    max_time = args.max_time or default_max_time(est)
+
+    print("partition=%s comm_mode=%s ebits=%d statevector_qubits=%d "
+          "mem_per_qpu=%dG est=%.0fs max_time=%s"
+          % (sizes, args.comm_mode, ebits, layout.statevector_qubits(), mem,
+             est, max_time))
+
+    if args.shadow:
+        counts, elapsed, stats = run_on_shadow(circuits, layout, args.shots, args.seed)
+        if stats["gen_ent_rounds"] and sum((k - 1) * v for k, v in stats["gen_ent_sizes"].items()) != ebits:
+            raise RuntimeError("shadow gen_ent audit disagrees with ebits: %s" % stats)
+    else:
+        counts, elapsed, taken = run_on_cunqa(circuits, layout, args.shots,
+                                              max_time, mem, args.seed)
+        print("CUNQA time_taken per vQPU (s):", taken)
+
+    phases = decode_joint(counts[0], layout)
     fidelity = fidelity_from_counts(phases, args.num_qubits, args.theta)
-    print(f"Fidelity: {fidelity}")
+    mismatch = marginal_mismatch(counts, layout)
+    print("Fidelity: %.6f   marginal TV mismatch: %.3g   run+gather: %.3f s"
+          % (fidelity, mismatch, elapsed))
+    if mismatch > 1e-12:
+        print("WARNING: node marginals disagree with the relayed joint "
+              "distribution -- shot pairing in the relay is broken.")
 
-    csv_file_path = write_result_row(
+    if args.shadow:
+        return
+
+    peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss   # driver only
+    path = write_result_row(
         emulator="cunqa", num_nodes=args.num_nodes, num_qubits=args.num_qubits,
-        theta=args.theta, shots=args.shots, execution_time=execution_time,
-        current_kb=peak_kb, peak_kb=peak_kb,
-        result=phases, algorithm="qft", fidelity=fidelity,
-        comm_mode=args.comm_mode,
+        theta=args.theta, shots=args.shots, execution_time=elapsed,
+        current_kb=peak_kb, peak_kb=peak_kb, result=phases, algorithm="qft",
+        fidelity=fidelity, ebits=ebits, comm_mode=args.comm_mode, noise="none",
     )
-    print(f"Wrote {csv_file_path}")
-    print(
-        "NOTE: current/peak memory above are the driver process only "
-        "(resource.getrusage), not the vQPU server -- see script header."
-    )
+    print("Wrote %s (memory column = driver process only)" % path)
 
 
 if __name__ == "__main__":

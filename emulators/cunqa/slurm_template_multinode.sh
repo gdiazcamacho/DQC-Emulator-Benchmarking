@@ -1,25 +1,26 @@
 #!/bin/bash
 #SBATCH --job-name={{JOB_NAME}}
-#SBATCH --output=%x_%j.out
-#SBATCH --error=%x_%j.err
-#SBATCH --time=00:30:00
+#SBATCH --output=../jobs/%x_%j.out
+#SBATCH --error=../jobs/%x_%j.err
+#SBATCH --time=2-00:00:00
+#SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=2G
 
-# This job requests minimal resources for the *driver* process only. The
-# driver calls qraise (inside qft_multinode.py), which submits its own SLURM
-# allocation for the vQPU servers -- so the actual simulation resources are
-# requested separately by qraise, not by this #SBATCH header.
+# This allocation is for the DRIVER only. qft_multinode.py calls qraise, which
+# submits a SEPARATE allocation for the vQPUs (quantum_comm for packed/basic,
+# classical_comm for dynamic) with a generated backend JSON and a memory
+# request sized from the statevector (see default_mem_per_qpu_gb), then qdrop.
+# The driver blocks until the vQPU run ends, so its --time must cover the
+# qraise budget (default_max_time caps that at 2 days).
+# Simulation memory is therefore NOT in this job's seff: run seff on the qraise
+# job id (printed by qraise) if you need it.
 #
-# NOTE: nested SLURM job submission (a job that itself calls qraise/sbatch)
-# is site-configuration-dependent. This has not been validated against
-# CESGA's actual scheduler config -- if `qraise` fails to submit from within
-# a running job here, run job_creator.py's CUNQA jobs interactively from a
-# login node instead, or ask CESGA support whether nested submission is
-# permitted on QMIO / FinisTerrae III.
+# Nested submission (sbatch from inside a running job) is site-configuration
+# dependent and unverified on QMIO / FinisTerrae III. If qraise fails here, run
+# the same command from a login node instead -- the script is identical.
 
-module load cunqa 2>/dev/null || true   # adjust to the actual module name if different
-conda activate cunqa_conda 2>/dev/null || true
+module load cunqa/3.0.0 2>/dev/null || module load cunqa 2>/dev/null || true
 
 python ../scripts/{{ALGORITHM}}_multinode.py \
     --num_qubits={{NUM_QUBITS}} \
@@ -28,8 +29,4 @@ python ../scripts/{{ALGORITHM}}_multinode.py \
     --shots={{SHOTS}} \
     --comm_mode={{COMM_MODE}}
 
-# Summarize resource usage with seff. Note this covers the driver process
-# above; it does NOT include the vQPU server processes qraise spawns as a
-# separate allocation (see script header for why memory figures are
-# driver-only for this emulator).
 seff $SLURM_JOBID

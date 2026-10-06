@@ -1,5 +1,68 @@
 # Changelog
 
+## [Unreleased] - CUNQA integration against 3.0.0
+
+Rewrites `emulators/cunqa/scripts/qft_multinode.py` against the CUNQA 3.0.0
+source (python package and C++ executors) and the QCE26 tutorial. The previous
+adapter had never run; checked on the new shadow executor, it could not have.
+
+### Fixed (previous adapter)
+- **Relayed bits never reached the counts.** CUNQA reports only clbits written
+  by a `measure(save=True)`; a `recv` under quantum_comm forces save=False and
+  under classical_comm never sets it. Node 0's counts therefore held only its
+  own qubits and the decoder indexed past the end of the key. Node 0 now
+  re-measures each relayed bit through a freed data qubit
+  (`cif(b) x(r); measure(r, b); cif(b) x(r)`).
+- **Classical-bit overflow at 8 nodes.** `cat_disentangler` receives one bit per
+  receiver into distinct clbits; the fixed 2-bit scratch region overflowed the
+  register at every 8-node point. Scratch width is now `num_nodes`.
+- **Default backends rejected the circuits.** quantum_comm vQPUs default to
+  (2 data, 1 comm) qubits and classical_comm to (6, 0); `run` raises for larger
+  circuits. A per-run backend JSON with `num_qubits: [max node size, comm]` is
+  now generated and passed to `qraise`.
+- **No memory request.** quantum_comm simulates one centralized state of
+  N + M qubits; `mem_per_qpu` is now sized from that (overridable).
+- CSV rows were labelled `Noise=depolarizing` (the writer's default); now `none`.
+- `Ebits` column now filled.
+
+### Added
+- `--comm_mode basic` (one two-party telegate per cross-node gate) and
+  `--comm_mode dynamic` (semiclassical iQFT over classical_comm, zero e-bits:
+  the tutorial's IPEA pattern applied to the benchmark's iQFT). Capability
+  matrix: cunqa = {basic, packed, dynamic}.
+- `emulators/cunqa/scripts/cunqa_shadow.py`: NumPy executor for the real
+  `CunqaCircuit` instruction streams with CUNQA 3.0.0 semantics (per-shot
+  lockstep, GHZ `gen_ent` with |0> assertion, save flags, counts key format,
+  one-clbit classical messages). `qft_multinode.py --shadow` uses it.
+- `estimate_seconds` / `default_max_time` size the qraise budget; driver
+  template walltime raised to 2 days to cover it.
+- Run-time check that each node's own counts equal the marginal of the relayed
+  joint distribution (catches broken shot pairing).
+- `tests/test_cunqa_adapter.py` (27 tests; circuit tests skip without the
+  cunqa Python package).
+
+### Verified (shadow executor, real cunqa 3.0.0 Python package)
+- Exact output for a non-palindromic basis theta at (n,M) = (4,1) (4,2) (6,2)
+  (6,3) (8,2) (8,4) (9,3) (10,2) (10,5) (8,8), all three modes.
+- theta = 0.33, 0.66 at 2000 shots, (7,2) [4,3] and (10,4) [3,3,2,2]:
+  fidelity within 2 sigma of an ideal multinomial sample of the same size.
+- E-bits: gen_ent audit == closed form == CHANGELOG formulas
+  (packed m*C(M,2), basic n^2(M-1)/(2M)).
+- Node marginals equal joint marginals exactly in every run.
+- No clbit index out of range anywhere in the sweep grid.
+
+### Fixed (repository)
+- `.gitignore` still contained `test_*.py`, so `tests/` was untracked despite
+  the phase-1 entry saying otherwise. Removed; `emulators/cunqa/backends/`
+  ignored instead.
+
+### Not yet done
+- No live run. First cluster step: 4 qubits / 2 nodes, each mode, against
+  noiseless Qiskit Aer.
+- Nested `qraise` from inside a SLURM job is unverified on QMIO/FT3.
+- The shadow models CUNQA's documented/observed semantics, not its timing; a
+  live run can still disagree (e.g. FIFO order of classical messages).
+
 ## [Unreleased] - communication-mode axis
 
 ### Added

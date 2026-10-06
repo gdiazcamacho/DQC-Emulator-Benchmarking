@@ -25,6 +25,9 @@ emulators/*/results/*.csv
 emulators/*/results/*.json
 emulators/*/results/*.npy
 
+# ── CUNQA: per-run backend JSONs written next to the scripts ────────────────
+emulators/cunqa/backends/
+
 # ── SquidASM runtime artefact ─────────────────────────────────────────────────
 # The live network config is auto-generated from config_template.yaml at runtime.
 emulators/squidasm/scripts/.config_file.yaml
@@ -37,7 +40,6 @@ tree.py
 tree_folders.py
 create_folder_structure.sh
 *_local.ipynb
-test_*.py
 sweep_params_old.yaml
 
 # ── OS / editor noise ─────────────────────────────────────────────────────────

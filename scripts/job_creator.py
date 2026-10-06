@@ -31,9 +31,12 @@ SUPPORTED_COMM_MODES = {
     # Both modes verified at fidelity 1.0 after the shared-QStream and
     # ancilla-reset fixes (see CHANGELOG / diagnose_squanch.py).
     "squanch":     {"basic", "packed"},
-    # CUNQA builds the packed-column construction explicitly in its script, so
-    # it is 'packed', not 'native': the schedule IS user-controlled.
-    "cunqa":       {"packed"},
+    # CUNQA builds every schedule explicitly (user-controlled, so never
+    # 'native'): packed/basic over quantum_comm telegates (cat_entangler ==
+    # our cat_entangle == NetQMPI expose), dynamic as the semiclassical iQFT
+    # over classical_comm. All three verified on the offline shadow executor
+    # (emulators/cunqa/scripts/cunqa_shadow.py); not yet on a live deployment.
+    "cunqa":       {"basic", "packed", "dynamic"},
     # Interlin-q partitions automatically; the teleportation schedule is not
     # user-controlled and its e-bit count is not comparable to ours.
     "interlin-q":  {"native"},

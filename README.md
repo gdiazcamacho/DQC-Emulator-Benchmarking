@@ -74,7 +74,7 @@ DQC-Emulator-Benchmarking/
 │   │   ├── jobs/
 │   │   └── results/
 │   │
-│   └── cunqa/                          # Not yet in the default sweep -- see note below
+│   └── cunqa/                          # In the sweep; shadow-validated, not yet run live
 │       ├── env/README.md               # CUNQA is built from source, not conda/pip
 │       ├── scripts/
 │       │   └── qft_multinode.py
@@ -105,7 +105,7 @@ DQC-Emulator-Benchmarking/
 | SquidASM | Yes | Yes | NetSquid-based |
 | Interlin-q | Yes | Yes | `num_qubits` must be divisible by `num_nodes` |
 | SQUANCH | Yes | Yes | |
-| CUNQA | **Not yet** | **No** (quantum-comm path has no noise model upstream as of this writing) | Driver-process-only memory accounting; see `emulators/cunqa/scripts/qft_multinode.py` module docstring for full validation status before adding to the sweep |
+| CUNQA 3.0.0 | Yes (`basic`, `packed`, `dynamic`) | **No** (no noise on communication paths upstream) | Shadow-validated only (`--shadow`, `tests/test_cunqa_adapter.py`); hand-check 4q/2n on QMIO before trusting the sweep. Memory column is the driver process only. Quantum-comm points simulate ONE global state of N+M qubits; 8-node 18-20-qubit points take hours |
 
 ---
 
