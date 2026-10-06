@@ -51,6 +51,19 @@ adapter had never run; checked on the new shadow executor, it could not have.
 - Node marginals equal joint marginals exactly in every run.
 - No clbit index out of range anywhere in the sweep grid.
 
+### Environment (pinned build, same on every cluster)
+- CUNQA pinned to tag 3.1.0 (commit 29130f6) and built from source by
+  `emulators/cunqa/env/install_cunqa.sh` into `$CUNQA_PREFIX`
+  (default `$HOME/opt/cunqa-3.1.0`), recording `BUILD_INFO`. Site modules are
+  not used: QMIO offered 2.4.0, whose telegate API (`expose`/`rcontrol`
+  context managers, implicit comm qubits, no `save` flag) is incompatible.
+- `emulators/cunqa/env/cunqa_env.sh` is the single environment for build,
+  tests and jobs (modules mirrored from CUNQA's configure.sh for QMIO/FT3,
+  `CUNQA_SITE_MODULES` elsewhere, `STORE`, PATH/PYTHONPATH). The SLURM
+  template sources it instead of `module load cunqa`.
+- The adapter and tests locate CUNQA via `CUNQA_PREFIX` (fallback `$HOME`) and
+  put `$CUNQA_PREFIX/bin` on PATH for `qraise`.
+
 ### Fixed (repository)
 - `.gitignore` still contained `test_*.py`, so `tests/` was untracked despite
   the phase-1 entry saying otherwise. Removed; `emulators/cunqa/backends/`

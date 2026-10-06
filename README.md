@@ -105,7 +105,7 @@ DQC-Emulator-Benchmarking/
 | SquidASM | Yes | Yes | NetSquid-based |
 | Interlin-q | Yes | Yes | `num_qubits` must be divisible by `num_nodes` |
 | SQUANCH | Yes | Yes | |
-| CUNQA 3.0.0 | Yes (`basic`, `packed`, `dynamic`) | **No** (no noise on communication paths upstream) | Shadow-validated only (`--shadow`, `tests/test_cunqa_adapter.py`); hand-check 4q/2n on QMIO before trusting the sweep. Memory column is the driver process only. Quantum-comm points simulate ONE global state of N+M qubits; 8-node 18-20-qubit points take hours |
+| CUNQA 3.1.0 (pinned, built from source: `emulators/cunqa/env/`) | Yes (`basic`, `packed`, `dynamic`) | **No** (no noise on communication paths upstream) | Shadow-validated only (`--shadow`, `tests/test_cunqa_adapter.py`); hand-check 4q/2n on QMIO before trusting the sweep. Memory column is the driver process only. Quantum-comm points simulate ONE global state of N+M qubits; 8-node 18-20-qubit points take hours |
 
 ---
 

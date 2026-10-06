@@ -96,8 +96,18 @@ if _REPO_ROOT not in _sys.path:
 from common.dqc_common import distribute_qubits, fidelity_from_counts, write_result_row
 # ------------------------------------------------------------------------------
 
-# cunqa is installed under $HOME on CESGA systems (as in its own examples).
-_sys.path.append(_os.getenv("HOME", ""))
+# Where CUNQA is installed (python package at $CUNQA_PREFIX/cunqa, CLI tools
+# such as `qraise` at $CUNQA_PREFIX/bin). Set by emulators/cunqa/env/cunqa_env.sh;
+# falls back to $HOME, CUNQA's own default install prefix.
+CUNQA_PREFIX = _os.path.expanduser(_os.getenv("CUNQA_PREFIX", _os.getenv("HOME", "")))
+if CUNQA_PREFIX and CUNQA_PREFIX not in _sys.path:
+    # Appended, not prepended: with the $HOME fallback, stray modules in $HOME
+    # must not shadow the standard library or numpy.
+    _sys.path.append(CUNQA_PREFIX)
+_bin = _os.path.join(CUNQA_PREFIX, "bin")
+if _os.path.isdir(_bin) and _bin not in _os.getenv("PATH", "").split(_os.pathsep):
+    # cunqa.qpu.qraise shells out to the `qraise` binary.
+    _os.environ["PATH"] = _bin + _os.pathsep + _os.getenv("PATH", "")
 
 CUNQA_COMM_MODES = ("packed", "basic", "dynamic")
 QUANTUM_MODES = ("packed", "basic")
@@ -435,6 +445,9 @@ def main():
     est = estimate_seconds(circuits, layout, args.shots)
     max_time = args.max_time or default_max_time(est)
 
+    if not args.shadow:
+        import cunqa
+        print("cunqa package: %s" % _os.path.dirname(cunqa.__file__))
     print("partition=%s comm_mode=%s ebits=%d statevector_qubits=%d "
           "mem_per_qpu=%dG est=%.0fs max_time=%s"
           % (sizes, args.comm_mode, ebits, layout.statevector_qubits(), mem,

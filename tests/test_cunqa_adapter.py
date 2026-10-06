@@ -4,7 +4,8 @@ Tests for the CUNQA adapter (emulators/cunqa/scripts/qft_multinode.py).
 Two tiers:
   * Layout/decoding tests need NumPy only.
   * Circuit tests need the CUNQA *Python* package importable (no C++ build, no
-    deployment): put the cunqa checkout on PYTHONPATH (or install under $HOME,
+    deployment): `source emulators/cunqa/env/cunqa_env.sh` (sets CUNQA_PREFIX), or
+    put a cunqa checkout on PYTHONPATH (or install under $HOME,
     as on CESGA). They build the real CunqaCircuits and run them on the offline
     shadow executor. Skipped cleanly otherwise.
 
@@ -19,7 +20,7 @@ import pytest
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "emulators", "cunqa", "scripts"))
-sys.path.append(os.getenv("HOME", ""))
+sys.path.append(os.path.expanduser(os.getenv("CUNQA_PREFIX", os.getenv("HOME", ""))))
 
 import qft_multinode as cq                                   # noqa: E402
 from common.dqc_common import distribute_qubits              # noqa: E402

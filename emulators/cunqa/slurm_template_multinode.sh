@@ -20,9 +20,10 @@
 # dependent and unverified on QMIO / FinisTerrae III. If qraise fails here, run
 # the same command from a login node instead -- the script is identical.
 
-module load cunqa/3.0.0 2>/dev/null || module load cunqa 2>/dev/null || true
+# Same environment as install_cunqa.sh (modules, CUNQA_PREFIX, STORE, PATH).
+source ../env/cunqa_env.sh
 
-python ../scripts/{{ALGORITHM}}_multinode.py \
+python3 ../scripts/{{ALGORITHM}}_multinode.py \
     --num_qubits={{NUM_QUBITS}} \
     --num_nodes={{NUM_NODES}} \
     --theta={{THETA}} \
