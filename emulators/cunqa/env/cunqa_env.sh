@@ -57,3 +57,15 @@ fi
 
 case ":$PATH:" in *":$CUNQA_PREFIX/bin:"*) ;; *) export PATH="$CUNQA_PREFIX/bin:$PATH" ;; esac
 case ":${PYTHONPATH:-}:" in *":$CUNQA_PREFIX:"*) ;; *) export PYTHONPATH="$CUNQA_PREFIX${PYTHONPATH:+:$PYTHONPATH}" ;; esac
+
+# CUNQA 3.1.0 bug (fixed upstream after the tag, PR #641): the Python qraise
+# creates a missing qpus.json as the JSON *string* "{}" instead of an object,
+# and the C++ qraise then fails with json type_error.305. Make sure the file
+# exists and holds an object; never touch a valid registry.
+_cunqa_qpus="$STORE/.cunqa/qpus.json"
+if ! python3 -c 'import json,sys; sys.exit(0 if isinstance(json.load(open(sys.argv[1])), dict) else 1)' "$_cunqa_qpus" 2>/dev/null; then
+    mkdir -p "$STORE/.cunqa"
+    echo '{}' > "$_cunqa_qpus"
+    echo "cunqa_env: (re)initialised $_cunqa_qpus as {} (CUNQA 3.1.0 qpus.json bug)" >&2
+fi
+unset _cunqa_qpus
