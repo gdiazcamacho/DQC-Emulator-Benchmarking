@@ -474,7 +474,8 @@ def main():
                          "estimate_seconds, clamped to [30 min, 2 days])")
     ap.add_argument("--mem_per_qpu", type=int, default=None,
                     help="GB per vQPU (default: from the global statevector size)")
-    ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="shadow runs only (CUNQA 3.1.0 re-seeds every shot)")
     ap.add_argument("--shadow", action="store_true",
                     help="Run on the offline NumPy shadow executor; writes no CSV.")
     ap.add_argument("--run_timeout", type=int, default=None,
@@ -489,6 +490,16 @@ def main():
             _sys.exit("Python %s is too old for CUNQA 3.x. Run "
                       "`source emulators/cunqa/env/cunqa_env.sh` first."
                       % _sys.version.split()[0])
+        if args.seed is not None:
+            # CUNQA 3.1.0 re-seeds the simulator at the start of EVERY shot
+            # (AERSimulatorAdapter::initialize -> set_seed(config.seed)), so a
+            # fixed seed makes every shot of a dynamic circuit identical: all
+            # shots land on one outcome and the fidelity collapses to that
+            # outcome's ideal probability. Observed on QMIO: theta=0.33 gave
+            # 0.768 (= p_ideal of the modal outcome) instead of ~0.99.
+            _sys.exit("--seed is not supported for live CUNQA runs: CUNQA "
+                      "3.1.0 reuses the seed for every shot. Use it with "
+                      "--shadow only.")
         if not _os.getenv("CUNQA_PREFIX"):
             _sys.exit("CUNQA_PREFIX is not set. Run "
                       "`source emulators/cunqa/env/cunqa_env.sh` first.")

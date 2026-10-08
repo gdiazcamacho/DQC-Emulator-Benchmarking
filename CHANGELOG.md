@@ -54,13 +54,37 @@ adapter had never run; checked on the new shadow executor, it could not have.
 ### Environment (pinned build, same on every cluster)
 - CUNQA pinned to tag 3.1.0 (commit 29130f6) and built from source by
   `emulators/cunqa/env/install_cunqa.sh` into `$CUNQA_PREFIX`
-  (default `$HOME/opt/cunqa-3.1.0`), recording `BUILD_INFO`. Site modules are
+  (default `$STORE/opt/cunqa-3.1.0`; source/build under `$STORE`,
+  never `$HOME`, whose quota the build tree exceeds), recording `BUILD_INFO`.
+  `pytest` is pip-installed with `--target` next to it. Site modules are
   not used: QMIO offered 2.4.0, whose telegate API (`expose`/`rcontrol`
   context managers, implicit comm qubits, no `save` flag) is incompatible.
 - `emulators/cunqa/env/cunqa_env.sh` is the single environment for build,
   tests and jobs (modules mirrored from CUNQA's configure.sh for QMIO/FT3,
   `CUNQA_SITE_MODULES` elsewhere, `STORE`, PATH/PYTHONPATH). The SLURM
   template sources it instead of `module load cunqa`.
+- Workaround for a CUNQA 3.1.0 bug (fixed upstream after the tag, PR #641):
+  Python `qraise` initialises a missing `$STORE/.cunqa/qpus.json` as the JSON
+  string `"{}"`, after which every `qraise` fails with json type_error.305.
+  `cunqa_env.sh` now (re)initialises it to `{}` when it is not a JSON object.
+- **Live-run fix, dynamic mode:** classical corrections used `p`, which CUNQA
+  3.1.0's Aer adapter does not implement (it has `u1`, the same gate). The
+  vQPU threw and its peer blocked on `recv` forever. Now `u1`; the shadow
+  executor rejects any gate outside the Aer adapter's set so this is caught
+  offline.
+- `gather` runs under a watchdog (`--run_timeout`, default = qraise budget),
+  so a dead vQPU produces an error and a `qdrop` instead of a hang.
+- Live runs refuse to start unless `cunqa_env.sh` was sourced (Python >= 3.9,
+  `CUNQA_PREFIX` set, and `cunqa` actually imported from it) -- a stale
+  `~/cunqa` from an older release was being picked up via the `$HOME` fallback.
+- **`--seed` refused for live runs.** CUNQA 3.1.0 re-seeds Aer at the start
+  of every shot (`AERSimulatorAdapter::initialize`), so with a seed every shot
+  of a dynamic circuit is identical. On QMIO at theta = 0.33 this gave
+  fidelity 0.768 for packed and basic (exactly p_ideal of the modal outcome)
+  and 0.003 for dynamic (each classical-comm vQPU replaying its own fixed
+  stream). Worth reporting upstream.
+- Live check on QMIO (4 qubits / 2 nodes, theta = 3/16): packed, basic and
+  dynamic give fidelity 1.000000 with zero marginal mismatch.
 - The adapter and tests locate CUNQA via `CUNQA_PREFIX` (fallback `$HOME`) and
   put `$CUNQA_PREFIX/bin` on PATH for `qraise`.
 
