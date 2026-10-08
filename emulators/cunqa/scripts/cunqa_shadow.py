@@ -68,6 +68,15 @@ class ShadowError(RuntimeError):
     pass
 
 
+# Gates CUNQA 3.1.0's Aer adapter implements (src/sim/simulators/AER/
+# AER_simulator_adapter.cpp, apply_gate cases), restricted to those this
+# shadow can execute. Anything else makes the real vQPU throw -- and, under
+# communication, leaves its peers blocked forever -- so the shadow rejects it
+# instead of silently simulating it. Notably `p` is NOT supported (use `u1`).
+AER_SUPPORTED = {"h", "x", "y", "z", "s", "sdg", "t", "tdg",
+                 "rz", "u1", "cx", "cz", "cp", "cu1", "crz", "swap"}
+
+
 def _as_list(v):
     return list(v) if isinstance(v, (list, tuple)) else [v]
 
@@ -241,6 +250,8 @@ def run_shadow(circuits, shots, comm="quantum", seed=None, max_qubits=22):
                         for q in _as_list(ins["qubits"]):
                             if st.measure(gq(i, q)):
                                 st.apply_1q(_GATES_1Q["x"], gq(i, q))
+                    elif name not in AER_SUPPORTED and name not in ("reset",):
+                        raise ShadowError("CUNQA 3.1.0 Aer does not implement %r" % name)
                     elif name in _GATES_1Q:
                         st.apply_1q(_GATES_1Q[name], gq(i, _as_list(ins["qubits"])[0]))
                     elif name in _PARAM_1Q:

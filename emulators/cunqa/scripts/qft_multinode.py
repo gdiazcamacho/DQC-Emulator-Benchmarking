@@ -263,7 +263,10 @@ def build_circuits(node_sizes, theta, comm_mode):
                 gj = gs[lj]
                 for gk in range(L.num_qubits - 1, gj, -1):     # every higher qubit
                     circs[i].cif(L.clbit(gk))
-                    circs[i].p(_angle(gk, gj), lj)
+                    # u1, not p: CUNQA 3.1.0's Aer adapter implements U1 but
+                    # not P (same matrix). An unsupported gate kills the vQPU
+                    # and every peer then blocks forever on recv.
+                    circs[i].u1(_angle(gk, gj), lj)
                     circs[i].endcif()
                 circs[i].h(lj)
                 circs[i].measure(lj, L.clbit(gj))
@@ -376,10 +379,48 @@ def write_backend_json(layout):
     return _os.path.abspath(path)
 
 
-def run_on_cunqa(circuits, layout, shots, max_time, mem_per_qpu, seed=None):
-    from cunqa.qpu import get_QPUs, qraise, qdrop, run
-    from cunqa.qjob import gather
+def _time_to_seconds(t):
+    """'D-HH:MM:SS' or 'HH:MM:SS' -> seconds."""
+    days, _, hms = t.rpartition("-")
+    h, m, sec = (int(x) for x in hms.split(":"))
+    return int(days or 0) * 86400 + h * 3600 + m * 60 + sec
 
+
+def _gather_with_timeout(qjobs, timeout_s):
+    """cunqa.qjob.gather, but give up after timeout_s.
+
+    If a vQPU dies (e.g. an unsupported gate), its peers block on recv and
+    gather() never returns. The wait runs in a daemon thread so the driver can
+    still raise, qdrop the family and exit."""
+    import threading
+    from cunqa.qjob import gather
+    box = {}
+
+    def _wait():
+        try:
+            box["results"] = gather(qjobs)
+        except BaseException as exc:          # surfaced in the caller
+            box["error"] = exc
+
+    th = threading.Thread(target=_wait, daemon=True)
+    th.start()
+    th.join(timeout_s)
+    if th.is_alive():
+        raise TimeoutError(
+            "CUNQA run did not finish within %ds. A vQPU probably failed and "
+            "its peers are blocked; check the newest files in "
+            "$STORE/.cunqa/logs/." % timeout_s)
+    if "error" in box:
+        raise box["error"]
+    return box["results"]
+
+
+def run_on_cunqa(circuits, layout, shots, max_time, mem_per_qpu, seed=None,
+                 run_timeout=None):
+    from cunqa.qpu import get_QPUs, qraise, qdrop, run
+
+    if run_timeout is None:
+        run_timeout = _time_to_seconds(max_time)
     backend = write_backend_json(layout)
     try:
         family = qraise(
@@ -394,7 +435,8 @@ def run_on_cunqa(circuits, layout, shots, max_time, mem_per_qpu, seed=None):
             if seed is not None:
                 kwargs["seed"] = seed
             start = time.time()
-            results = gather(run(circuits, qpus, **kwargs))
+            results = _gather_with_timeout(run(circuits, qpus, **kwargs),
+                                           run_timeout)
             elapsed = time.time() - start
         finally:
             qdrop(family)
@@ -435,7 +477,21 @@ def main():
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--shadow", action="store_true",
                     help="Run on the offline NumPy shadow executor; writes no CSV.")
+    ap.add_argument("--run_timeout", type=int, default=None,
+                    help="seconds to wait for results before giving up "
+                         "(default: the qraise budget)")
     args = ap.parse_args()
+
+    if not args.shadow:
+        # Live runs must use the pinned build, never a stray cunqa package
+        # found via the $HOME fallback (e.g. an old ~/cunqa from 2.x).
+        if _sys.version_info < (3, 9):
+            _sys.exit("Python %s is too old for CUNQA 3.x. Run "
+                      "`source emulators/cunqa/env/cunqa_env.sh` first."
+                      % _sys.version.split()[0])
+        if not _os.getenv("CUNQA_PREFIX"):
+            _sys.exit("CUNQA_PREFIX is not set. Run "
+                      "`source emulators/cunqa/env/cunqa_env.sh` first.")
 
     sizes = distribute_qubits(args.num_qubits, args.num_nodes)
     circuits, layout, ebits = build_circuits(sizes, args.theta, args.comm_mode)
@@ -447,7 +503,12 @@ def main():
 
     if not args.shadow:
         import cunqa
-        print("cunqa package: %s" % _os.path.dirname(cunqa.__file__))
+        where = _os.path.dirname(_os.path.abspath(cunqa.__file__))
+        print("cunqa package: %s" % where)
+        if not where.startswith(_os.path.abspath(CUNQA_PREFIX) + _os.sep):
+            _sys.exit("cunqa was imported from %s, not from CUNQA_PREFIX=%s. "
+                      "Another cunqa install shadows the pinned build."
+                      % (where, CUNQA_PREFIX))
     print("partition=%s comm_mode=%s ebits=%d statevector_qubits=%d "
           "mem_per_qpu=%dG est=%.0fs max_time=%s"
           % (sizes, args.comm_mode, ebits, layout.statevector_qubits(), mem,
@@ -459,7 +520,8 @@ def main():
             raise RuntimeError("shadow gen_ent audit disagrees with ebits: %s" % stats)
     else:
         counts, elapsed, taken = run_on_cunqa(circuits, layout, args.shots,
-                                              max_time, mem, args.seed)
+                                              max_time, mem, args.seed,
+                                              run_timeout=args.run_timeout)
         print("CUNQA time_taken per vQPU (s):", taken)
 
     phases = decode_joint(counts[0], layout)

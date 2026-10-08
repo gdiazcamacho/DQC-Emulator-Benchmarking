@@ -1,0 +1,9 @@
+srun: Job step's --cpus-per-task value exceeds that of job (3 > 2). Job step may never run.
+(10/06/26 02:02:55 PM) [QPU 560017_0] debug: Server bound to tcp://10.5.7.111:44147  176ms
+(10/06/26 02:02:55 PM) [QPU 560017_1] debug: Server bound to tcp://10.5.7.111:35025  176ms
+(10/06/26 02:02:55 PM) [QPU 560017_2] debug: Server bound to tcp://10.5.7.111:37055  177ms
+srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
+srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
+slurmstepd-c7-11: error: *** JOB 560017 ON c7-11 CANCELLED AT 2026-10-06T14:02:56 ***
+slurmstepd-c7-11: error: *** STEP 560017.0 ON c7-11 CANCELLED AT 2026-10-06T14:02:56 ***
+slurmstepd-c7-11: error: *** STEP 560017.1 ON c7-11 CANCELLED AT 2026-10-06T14:02:56 ***

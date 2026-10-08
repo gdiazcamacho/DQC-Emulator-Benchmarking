@@ -1,0 +1,7 @@
+(10/06/26 02:14:11 PM) [QPU 560020_0] debug: Server bound to tcp://10.5.7.8:42357  169ms
+(10/06/26 02:14:11 PM) [QPU 560020_1] debug: Server bound to tcp://10.5.7.8:36231  169ms
+srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
+srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
+slurmstepd-c7-8: error: *** JOB 560020 ON c7-8 CANCELLED AT 2026-10-06T14:14:12 ***
+slurmstepd-c7-8: error: *** STEP 560020.1 ON c7-8 CANCELLED AT 2026-10-06T14:14:12 ***
+slurmstepd-c7-8: error: *** STEP 560020.0 ON c7-8 CANCELLED AT 2026-10-06T14:14:12 ***

@@ -1,0 +1,14 @@
+mkdir: Read-only file system
+mkdir: Read-only file system
+terminate called after throwing an instance of 'std::runtime_error'
+terminate called after throwing an instance of 'std::runtime_error'
+  what():  Error reading JSON safely using POSIX (fcntl) locks.
+System message: Failed to create directory: /mnt/netapp1/Store_CESGA
+  what():  Error reading JSON safely using POSIX (fcntl) locks.
+System message: Failed to create directory: /mnt/netapp1/Store_CESGA
+srun: error: c7-12: tasks 0-1: Aborted (core dumped)
+srun: Terminating StepId=560018.1
+terminate called after throwing an instance of 'std::runtime_error'
+  what():  Timed out waiting for QPU communication entries
+srun: error: c7-12: task 0: Aborted (core dumped)
+srun: Terminating StepId=560018.0
