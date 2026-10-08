@@ -16,9 +16,9 @@
 # Simulation memory is therefore NOT in this job's seff: run seff on the qraise
 # job id (printed by qraise) if you need it.
 #
-# Nested submission (sbatch from inside a running job) is site-configuration
-# dependent and unverified on QMIO / FinisTerrae III. If qraise fails here, run
-# the same command from a login node instead -- the script is identical.
+# Nested submission (qraise's sbatch from inside this job) works on QMIO
+# (verified 2026-10-08, job 561229). It is site-configuration dependent
+# elsewhere; if qraise fails here, run the same command from a login node.
 
 # Same environment as install_cunqa.sh (modules, CUNQA_PREFIX, STORE, PATH).
 source ../env/cunqa_env.sh

@@ -85,6 +85,12 @@ adapter had never run; checked on the new shadow executor, it could not have.
   stream). Worth reporting upstream.
 - Live check on QMIO (4 qubits / 2 nodes, theta = 3/16): packed, basic and
   dynamic give fidelity 1.000000 with zero marginal mismatch.
+- Live check on QMIO, theta = 0.33, 1000 shots: packed 0.9984, basic 0.9943,
+  dynamic 0.9931, noiseless Aer packed 0.9955 -- all within the spread of
+  ideal 1000-shot sampling (0.9953 +/- 0.0022).
+- Nested submission verified on QMIO: the SLURM driver job's qraise submits
+  the vQPU allocation from inside the job (job 561229, 100 shots, fidelity
+  0.9559; ideal 100-shot sampling gives 0.9505 +/- 0.0125).
 - The adapter and tests locate CUNQA via `CUNQA_PREFIX` (fallback `$HOME`) and
   put `$CUNQA_PREFIX/bin` on PATH for `qraise`.
 
