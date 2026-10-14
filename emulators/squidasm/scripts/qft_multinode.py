@@ -21,7 +21,7 @@ _REPO_ROOT = _os.path.abspath(_os.path.join(_os.path.dirname(_os.path.abspath(__
 if _REPO_ROOT not in _sys.path:
     _sys.path.insert(0, _REPO_ROOT)
 from common.dqc_common import (
-    distribute_qubits, fidelity_from_counts, write_result_row,
+    distribute_qubits, fidelity_from_counts, write_result_row, package_version,
 )
 # ------------------------------------------------------------------------------
 
@@ -111,11 +111,13 @@ class QFTNode(AbstractNode):
             *args,
             theta,
             network_structure,
+            comm_mode: str = "packed",
             verbose: bool = False,
             **kwargs
             ):
 
         super().__init__(*args, **kwargs)
+        self.comm_mode = comm_mode
         self.theta = theta
         self.dim_qft = self.max_qubits
         self.network_structure = network_structure
@@ -191,7 +193,59 @@ class QFTNode(AbstractNode):
                     print(f"{self.name}: (PG) CP({i}, {j}) = -p/{2**(i + num_own_qubits - j + distance)}")
             yield from self.cat_disentangle_target(epr, peer)
 
+    def run_dynamic(self, context: ProgramContext):
+        """'dynamic' comm mode: semiclassical inverse QFT, zero e-bits.
+
+        No EPR pair is ever requested. Each node first receives, over its
+        classical sockets, every measured bit of every higher node (a sender
+        emits its bits in descending global order, so per-socket FIFO order
+        matches the order read here). It then processes its own qubits from
+        the highest down: classically conditioned Z rotations for every higher
+        qubit whose bit is 1, H, measure, flush (the bit must be a Python int
+        before it can condition anything or be sent), and send the bit to
+        every lower node. Angles and qubit order follow inverse_QFT() and the
+        global offsets used by _fourier_state().
+        """
+        self.context = context
+        names = list(self.network_structure.keys())
+        my_index = names.index(self.name)
+        offsets = {nm: sum(list(self.network_structure.values())[:i])
+                   for i, nm in enumerate(names)}
+        n_total = sum(self.network_structure.values())
+        base = offsets[self.name]
+        higher = [p for p in names if names.index(p) > my_index]
+        lower = [p for p in names if names.index(p) < my_index]
+
+        [self.init_qubit(i) for i in range(self.max_qubits)]
+        self._fourier_state(qubits_qft=self.qubits, theta=self.theta,
+                            start_from=base, verbose=self.verbose)
+        yield from self.connection.flush()
+
+        bits = {}
+        for peer in higher:
+            pb = offsets[peer]
+            for g in range(pb + self.network_structure[peer] - 1, pb - 1, -1):
+                msg = yield from self.context.csockets[peer].recv()
+                bits[g] = int(msg)
+
+        for lj in range(len(self.qubits) - 1, -1, -1):
+            gj = base + lj
+            q = self.qubits[lj]
+            for gk in range(n_total - 1, gj, -1):
+                if bits[gk]:
+                    q.rot_Z(angle=2 * np.pi - np.pi / (2 ** (gk - gj)))
+            q.H()
+            m = q.measure()
+            yield from self.connection.flush()
+            bits[gj] = int(m)
+            for peer in lower:
+                self.context.csockets[peer].send(str(bits[gj]))
+        yield from self.connection.flush()
+        return [bits[base + i] for i in range(len(self.qubits))]
+
     def run(self, context: ProgramContext):
+        if self.comm_mode == "dynamic":
+            return (yield from self.run_dynamic(context))
         self.context = context
 
         my_index = list(self.network_structure.keys()).index(self.name)
@@ -266,6 +320,14 @@ class QFTNode(AbstractNode):
         
         return [int(o) for o in output]
 
+def expected_ebits(node_qubits, comm_mode):
+    """Analytic e-bit cost, same convention as the other scripts:
+    packed = one EPR pair per (control qubit, lower node); dynamic = 0."""
+    if comm_mode == "dynamic":
+        return 0
+    return sum(nq * i for i, nq in enumerate(node_qubits))
+
+
 def run_DQFT(
         theta: float,
         node_qubits=[4, 4],
@@ -274,6 +336,7 @@ def run_DQFT(
         config_template="config_template.yaml",
         verbose=False,
         delete_temp_file=True,
+        comm_mode="packed",
     ):
 
     network_structure = {node: nq for node, nq in zip(node_names, node_qubits)}
@@ -294,6 +357,7 @@ def run_DQFT(
             network_structure=network_structure,
             theta=theta,
             qubits=nq,
+            comm_mode=comm_mode,
             verbose=verbose
             )
         for name, nq in network_structure.items()
@@ -320,17 +384,27 @@ if __name__ == "__main__":
     parser.add_argument('--theta', type=float, required=True, help='Initial angle theta')
     parser.add_argument('--shots', type=int, required=True, help='Number of shots')
     parser.add_argument('--comm_mode', type=str, default='packed',
-                        choices=['packed'],
-                        help="Communication schedule. Only 'packed' is "
-                             "implemented here so far; the flag exists so the "
-                             "job scaffolding can pass the axis uniformly.")
+                        choices=['packed', 'dynamic'],
+                        help="Communication schedule. 'packed': cat-entangle "
+                             "telegates (one EPR pair per control qubit per "
+                             "peer). 'dynamic': semiclassical iQFT over the "
+                             "classical sockets only, zero EPR pairs.")
+    parser.add_argument('--noise', type=str, default='none',
+                        choices=['none', 'device'],
+                        help="'none': config-QFT-noiseless.yaml (perfect links, "
+                             "no depolarising, no decoherence). 'device': "
+                             "config_template.yaml (1%% / 10%% gate "
+                             "depolarising, link fidelity 0.9, T1/T2).")
     
     # Parse the arguments
     args = parser.parse_args()
     
     emulator = "squidasm"
     verbose = False
-    config_template = '../scripts/config_template.yaml'
+    config_template = {
+        "none": '../scripts/config-QFT-noiseless.yaml',
+        "device": '../scripts/config_template.yaml',
+    }[args.noise]
     num_qubits = args.num_qubits
     num_nodes = args.num_nodes
     theta = args.theta
@@ -351,9 +425,10 @@ if __name__ == "__main__":
       node_qubits=node_qubits,
       node_names=node_names,
       shots=shots,
-      config_template = '../scripts/config_template.yaml',
+      config_template = config_template,
       verbose=verbose,
-      delete_temp_file=delete_temp_file
+      delete_temp_file=delete_temp_file,
+      comm_mode=args.comm_mode,
       )
     
     execution_time = time.time() - start_time  # Calculate execution time
@@ -371,8 +446,9 @@ if __name__ == "__main__":
     # Convert each shot into a bitstring
     bitstrings = ["".join(map(str, row)) for row in combined]
     # Convert to float values (rescaled binary to [0,1))
-    num_qubits = combined.shape[1]
-    float_values = [int(bits, 2) / (2 ** total_qubits) for bits in bitstrings]
+    # `total_qubits` was undefined here (NameError after every simulation).
+    assert combined.shape[1] == num_qubits, (combined.shape, num_qubits)
+    float_values = [int(bits, 2) / (2 ** num_qubits) for bits in bitstrings]
     # Count frequencies
     counts = dict(Counter(float_values))
     sorted_counts = dict(sorted(counts.items()))
@@ -386,6 +462,8 @@ if __name__ == "__main__":
         theta=theta, shots=shots, execution_time=execution_time,
         current_kb=current / 1024, peak_kb=peak / 1024,
         result=sorted_counts, algorithm="qft", fidelity=fidelity,
-        comm_mode=args.comm_mode,
+        comm_mode=args.comm_mode, noise=args.noise,
+        ebits=expected_ebits(node_qubits, args.comm_mode),
+        emulator_version=package_version("squidasm"),
     )
     print(f"Wrote {csv_file_path}")

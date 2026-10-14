@@ -99,8 +99,23 @@ DQC-Emulator-Benchmarking/
 
 ## Emulator status
 
-| Emulator | In default sweep | Noise | Notes |
+One algorithm (distributed inverse QFT), run with explicit communication
+schedules: `basic` (one telegate per gate), `packed` (one telegate per control
+qubit per lower node), `dynamic` (semiclassical iQFT: measure + classically
+conditioned phases, zero e-bits) and Interlin-q's own `native` partitioning.
+
+| Emulator | Comm modes | Noise models | Notes |
 |---|---|---|---|
+| Qiskit Aer | basic, packed, dynamic | none, depolarizing | Monolithic reference; models no network |
+| SquidASM | packed, dynamic | none (`config-QFT-noiseless.yaml`), device (`config_template.yaml`) | NetSquid-based; `dynamic` validated offline with a mock harness only |
+| SQUANCH | basic, packed, dynamic | none | Quantum modes simulate one dense density matrix (`n + 2*nodes` qubits): capped at 10 qubits |
+| CUNQA 3.1.0 | basic, packed, dynamic | none | Built from source (`emulators/cunqa/env/`); quantum modes capped at 4 nodes; memory column = driver only |
+| Interlin-q | native | none | `num_qubits` must be divisible by `num_nodes` |
+
+Campaigns (the results that go in the paper) are run from a tagged clean
+checkout following [`docs/CAMPAIGN.md`](docs/CAMPAIGN.md).
+
+---|---|---|---|
 | Qiskit Aer | Yes | Yes | Reference / monolithic baseline |
 | SquidASM | Yes | Yes | NetSquid-based |
 | Interlin-q | Yes | Yes | `num_qubits` must be divisible by `num_nodes` |
@@ -240,7 +255,9 @@ For SquidASM, `qft_multinode.py` auto-generates a temporary NetSquid network con
 ## Output Format
 
 Each run writes a **single-row** CSV to
-`emulators/<name>/results/<algorithm>_<name>_<nodes>_q<qubits>_a<theta>.csv`:
+`emulators/<name>/results/<algorithm>_<comm_mode>_<noise>_<name>_<nodes>_q<qubits>_a<theta>_s<shots>.csv`
+(every axis that can differ between two runs is in the name, so none can
+overwrite another):
 
 | Column | Description |
 |---|---|
@@ -253,7 +270,12 @@ Each run writes a **single-row** CSV to
 | `Execution Time (s)` | Wall-clock simulation time |
 | `Current Memory (KB)` | Memory at end of run via `tracemalloc` |
 | `Peak Memory (KB)` | Peak memory via `tracemalloc` |
-| `Fidelity` | Classical fidelity vs. the analytic inverse-QFT distribution |
+| `Comm Mode` | `basic`, `packed`, `dynamic` or `native` |
+| `Noise` | Error model actually applied (`none`, `depolarizing`, `device`) |
+| `Fidelity` | Classical fidelity vs. the analytic inverse-QFT distribution; compare with `results/baselines/ideal_sampling.csv` (a perfect emulator does not score 1 at finite shots) |
+| `Ebits` | Entangled pairs consumed (0 for `dynamic`) |
+| `Packed` | Legacy boolean, derived from `Comm Mode` |
+| `Campaign`, `Code Commit`, `Emulator Version` | Provenance, stamped by `job_creator.py` |
 | `Result` | Measured phase histogram |
 
 Two conventions matter and are enforced by `common/dqc_common.write_result_row`:

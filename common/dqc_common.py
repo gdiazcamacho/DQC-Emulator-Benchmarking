@@ -36,6 +36,9 @@ __all__ = [
     "repo_root",
     "results_dir",
     "write_result_row",
+    "result_filename",
+    "code_commit",
+    "package_version",
     "CSV_COLUMNS",
     "COMM_MODES",
     "NOISE_SETTINGS",
@@ -204,6 +207,9 @@ CSV_COLUMNS = [
     "Fidelity",
     "Ebits",
     "Packed",
+    "Campaign",
+    "Code Commit",
+    "Emulator Version",
     "Result",
 ]
 
@@ -227,10 +233,61 @@ _PACKED_FROM_MODE = {"packed": True, "basic": False, "dynamic": "", "native": ""
 NOISE_SETTINGS = ("none", "depolarizing", "device")
 
 
+def code_commit():
+    """Commit that produced a run.
+
+    job_creator.py stamps DQC_COMMIT into every job script (and refuses to
+    stamp a dirty tree), so campaign runs never depend on git being callable
+    from a compute node. Interactive runs fall back to asking git, marking
+    uncommitted changes with '-dirty'.
+    """
+    env = os.environ.get("DQC_COMMIT")
+    if env:
+        return env
+    import subprocess
+    try:
+        root = repo_root()
+        sha = subprocess.check_output(
+            ["git", "-C", root, "rev-parse", "--short=12", "HEAD"],
+            stderr=subprocess.DEVNULL, text=True).strip()
+        dirty = subprocess.call(
+            ["git", "-C", root, "diff", "--quiet", "HEAD", "--"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0
+        return sha + ("-dirty" if dirty else "")
+    except Exception:
+        return "unknown"
+
+
+def package_version(*dist_names):
+    """Installed version of the first distribution found, e.g.
+    package_version("qiskit-aer"). Returns "unknown" if none is installed."""
+    try:
+        from importlib.metadata import version, PackageNotFoundError
+    except ImportError:                      # Python < 3.8
+        return "unknown"
+    for name in dist_names:
+        try:
+            return "{0}=={1}".format(name, version(name))
+        except PackageNotFoundError:
+            continue
+    return "unknown"
+
+
+def result_filename(algorithm, comm_mode, noise, emulator, num_nodes,
+                    num_qubits, theta, shots):
+    """One file per run coordinate. Every axis that can differ between two
+    runs of the same configuration -- including shots -- is in the name, so
+    no run can silently overwrite another."""
+    return "{0}_{1}_{2}_{3}_{4}_q{5}_a{6}_s{7}.csv".format(
+        algorithm, comm_mode, noise, emulator, num_nodes, num_qubits, theta,
+        shots)
+
+
 def write_result_row(emulator, num_nodes, num_qubits, theta, shots,
                      execution_time, current_kb, peak_kb, result,
                      algorithm="qft", fidelity=None, ebits=None, packed=None,
-                     comm_mode=None, noise="depolarizing", path=None):
+                     comm_mode=None, noise=None, path=None,
+                     emulator_version=None):
     """Write a single benchmark run to its own one-row CSV.
 
     The suite's convention is strictly one row per run: `plot_results.py`
@@ -259,16 +316,19 @@ def write_result_row(emulator, num_nodes, num_qubits, theta, shots,
     if packed is None:
         packed = _PACKED_FROM_MODE[comm_mode]
 
+    # No default: every script must state its error model. A default of
+    # "depolarizing" previously mislabelled noiseless SQUANCH/Interlin-q rows.
+    if noise is None:
+        raise ValueError("noise must be given explicitly ({0})".format(
+            NOISE_SETTINGS))
     if noise not in NOISE_SETTINGS:
         raise ValueError("noise {0!r} not in {1}".format(noise, NOISE_SETTINGS))
 
     if path is None:
         path = os.path.join(
             results_dir(emulator),
-            "{0}_{1}_{2}_{3}_{4}_q{5}_a{6}.csv".format(
-                algorithm, comm_mode, noise, emulator, num_nodes, num_qubits,
-                theta
-            ),
+            result_filename(algorithm, comm_mode, noise, emulator, num_nodes,
+                            num_qubits, theta, shots),
         )
 
     with open(path, mode="w", newline="") as handle:
@@ -289,6 +349,9 @@ def write_result_row(emulator, num_nodes, num_qubits, theta, shots,
             "" if fidelity is None else fidelity,
             "" if ebits is None else ebits,
             "" if packed is None else packed,
+            os.environ.get("DQC_CAMPAIGN", ""),
+            code_commit(),
+            emulator_version or "unknown",
             result,
         ])
     return path

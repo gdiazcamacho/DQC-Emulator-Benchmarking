@@ -25,7 +25,7 @@ _REPO_ROOT = _os.path.abspath(_os.path.join(_os.path.dirname(_os.path.abspath(__
 if _REPO_ROOT not in _sys.path:
     _sys.path.insert(0, _REPO_ROOT)
 from common.dqc_common import (
-    distribute_qubits, fidelity_from_counts, write_result_row,
+    distribute_qubits, fidelity_from_counts, write_result_row, package_version,
 )
 # ------------------------------------------------------------------------------
 ################################################################################
@@ -350,6 +350,12 @@ if __name__ == "__main__":
     parser.add_argument('--num_nodes', type=int, required=True, help='Number of nodes')       
     parser.add_argument('--theta', type=float, required=True, help='Initial angle theta')
     parser.add_argument('--shots', type=int, required=True, help='Number of shots')
+    # Interlin-q partitions and teleports on its own, so its schedule is not
+    # user-controlled ('native'), and it runs noiseless here. Both flags exist
+    # because job_creator passes every axis to every emulator; without them
+    # argparse rejected --comm_mode and every Interlin-q job failed.
+    parser.add_argument('--comm_mode', type=str, default='native', choices=['native'])
+    parser.add_argument('--noise', type=str, default='none', choices=['none'])
 
     # Parse the arguments
     args = parser.parse_args()
@@ -395,5 +401,7 @@ if __name__ == "__main__":
           theta=theta, shots=shots, execution_time=execution_time,
           current_kb=current / 1024, peak_kb=peak / 1024,
           result=phases, algorithm="qft", fidelity=fidelity,
+          comm_mode=args.comm_mode, noise=args.noise,
+          emulator_version=package_version("interlin-q", "interlinq"),
       )
       print(f"Wrote {csv_file_path}")

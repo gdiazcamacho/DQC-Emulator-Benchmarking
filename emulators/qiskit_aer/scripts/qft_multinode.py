@@ -19,6 +19,7 @@ if _REPO_ROOT not in _sys.path:
     _sys.path.insert(0, _REPO_ROOT)
 from common.dqc_common import (
     distribute_qubits, partition_list, fidelity_from_counts, write_result_row,
+    package_version,
 )
 # ------------------------------------------------------------------------------
 ################################################################################
@@ -269,10 +270,37 @@ def recursive_qft_telegate(n, theta, num_nodes, swap_qubits=True, min_rotation=0
         
     return circ, ebits_used
 
+def semiclassical_qft(n, theta, num_nodes):
+    """Distributed inverse QFT in 'dynamic' mode: zero e-bits.
+
+    Deferred-measurement (Griffiths-Niu) form. Every qubit is measured right
+    after its Hadamard, and each controlled phase it would have driven becomes
+    a phase on the lower qubit conditioned on that classical bit. Valid only
+    because the transform is terminal (immediately measured), which
+    job_creator.DYNAMIC_ONLY_FOR enforces.
+
+    Aer simulates one circuit, so "distribution" here is bookkeeping: the
+    node partition decides which conditioned phases would need a classical
+    message between nodes. It does not change the simulation; it is kept so
+    the run is the same benchmark as the CUNQA/SQUANCH/SquidASM dynamic runs.
+    Global qubit order and angles follow myqft_inverse().
+    """
+    fourier = QuantumRegister(n, name="q")
+    creg = ClassicalRegister(n, name="m")
+    circ = QuantumCircuit(fourier, creg)
+    fourier_state(circ, theta, qubits=list(fourier))
+    for j in range(n - 1, -1, -1):
+        for k in range(n - 1, j, -1):          # every higher, already-measured qubit
+            with circ.if_test((creg[k], 1)):
+                circ.p(-np.pi / 2 ** (k - j), fourier[j])
+        circ.h(fourier[j])
+        circ.measure(fourier[j], creg[j])
+    return circ, 0
+
 ###############################
 
 def run_DQFT(num_qft_qubits, num_nodes, theta, shots, verbose, packing=True,
-             noise="depolarizing"):
+             noise="none", comm_mode=None):
     """Run the distributed inverse QFT on Qiskit Aer.
 
     `noise` selects the error model:
@@ -300,8 +328,11 @@ def run_DQFT(num_qft_qubits, num_nodes, theta, shots, verbose, packing=True,
 #     all_qubits = [q for q in range(num_qft_qubits)]
 #     nodes = partition_list(all_qubits, partitions)[::-1]
 
-    dqc, ebits_used = recursive_qft_telegate(
-        num_qft_qubits, theta, num_nodes, swap_qubits=False, packing=packing)
+    if comm_mode == "dynamic":
+        dqc, ebits_used = semiclassical_qft(num_qft_qubits, theta, num_nodes)
+    else:
+        dqc, ebits_used = recursive_qft_telegate(
+            num_qft_qubits, theta, num_nodes, swap_qubits=False, packing=packing)
     dqct = transpile(dqc,backend)
     
     counts_d_all = backend.run(dqct, shots = shots).result().get_counts()
@@ -334,8 +365,10 @@ if __name__ == "__main__":
     parser.add_argument('--theta', type=float, required=True, help='Initial angle theta')
     parser.add_argument('--shots', type=int, required=True, help='Number of shots')
     parser.add_argument('--comm_mode', type=str, default='packed',
-                        choices=['basic', 'packed'],
-                        help="Communication schedule. 'packed' uses the "
+                        choices=['basic', 'packed', 'dynamic'],
+                        help="Communication schedule. 'dynamic' is the "
+                             "semiclassical iQFT (measure + classically "
+                             "conditioned phases, zero e-bits). 'packed' uses the "
                              "cat-entangle/disentangle construction (one "
                              "teleportation per control qubit); 'basic' uses the "
                              "naive one-Bell-pair-per-gate telegate baseline. "
@@ -344,13 +377,12 @@ if __name__ == "__main__":
                              "saving due to packing. See recursive_qft_telegate().")
     parser.add_argument('--telegate_baseline', action='store_true',
                         help='Deprecated alias for --comm_mode=basic.')
-    parser.add_argument('--noise', type=str, default='depolarizing',
+    parser.add_argument('--noise', type=str, default='none',
                         choices=['depolarizing', 'none'],
-                        help="Error model. Default 'depolarizing' preserves the "
-                             "historical behaviour (this model was previously "
-                             "applied unconditionally). Use 'none' to verify "
-                             "circuit correctness before interpreting any "
-                             "fidelity figure.")
+                        help="Error model. 'depolarizing' is the historical "
+                             "model (1%% on x/h, 2%% on cx). job_creator always "
+                             "passes this explicitly; the default only affects "
+                             "manual runs.")
 
     # Parse the arguments
     args = parser.parse_args()
@@ -376,7 +408,8 @@ if __name__ == "__main__":
     start_time = time.time()
     
     phases, ebits_used = run_DQFT(num_qubits, num_nodes, theta, shots, verbose,
-                                  packing=packing, noise=args.noise)
+                                  packing=packing, noise=args.noise,
+                                  comm_mode=comm_mode)
 
     # Record the end time
     end_time = time.time()
@@ -404,8 +437,8 @@ if __name__ == "__main__":
         theta=theta, shots=shots, execution_time=execution_time,
         current_kb=current / 1024, peak_kb=peak / 1024,
         result=phases, algorithm=algorithm, fidelity=fidelity,
-        ebits=ebits_used, packed=packing, comm_mode=comm_mode,
-        noise=args.noise,
+        ebits=ebits_used, comm_mode=comm_mode,
+        noise=args.noise, emulator_version=package_version("qiskit-aer"),
     )
     print(f"Wrote {csv_file_path}")
     

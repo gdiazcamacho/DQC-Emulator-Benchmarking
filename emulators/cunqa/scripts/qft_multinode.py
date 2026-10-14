@@ -366,6 +366,20 @@ def default_max_time(est_seconds):
     return "%d-%02d:%02d:00" % (d, h, rem // 60)
 
 
+def cunqa_version():
+    """'cunqa==<tag>+<commit12>' from $CUNQA_PREFIX/BUILD_INFO (written by
+    install_cunqa.sh). CUNQA's own VERSION.txt is not bumped with its tags."""
+    info = {}
+    try:
+        with open(_os.path.join(CUNQA_PREFIX, "BUILD_INFO")) as fh:
+            for line in fh:
+                k, _, v = line.strip().partition("=")
+                info[k] = v
+    except OSError:
+        return "unknown"
+    return "cunqa=={0}+{1}".format(info.get("tag", "?"), info.get("commit", "?")[:12])
+
+
 def write_backend_json(layout):
     bdir = _os.path.join(_SCRIPT_DIR, "..", "backends")
     _os.makedirs(bdir, exist_ok=True)
@@ -553,6 +567,7 @@ def main():
         theta=args.theta, shots=args.shots, execution_time=elapsed,
         current_kb=peak_kb, peak_kb=peak_kb, result=phases, algorithm="qft",
         fidelity=fidelity, ebits=ebits, comm_mode=args.comm_mode, noise="none",
+        emulator_version=cunqa_version(),
     )
     print("Wrote %s (memory column = driver process only)" % path)
 

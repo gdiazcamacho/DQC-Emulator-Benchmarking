@@ -22,7 +22,7 @@ _REPO_ROOT = _os.path.abspath(_os.path.join(_os.path.dirname(_os.path.abspath(__
 if _REPO_ROOT not in _sys.path:
     _sys.path.insert(0, _REPO_ROOT)
 from common.dqc_common import (
-    distribute_qubits, fidelity_from_counts, write_result_row,
+    distribute_qubits, fidelity_from_counts, write_result_row, package_version,
 )
 # ------------------------------------------------------------------------------
 
@@ -190,7 +190,49 @@ class QFTNode(Agent):
                             CRz(token, q_t, -np.pi / (2 ** (g_c - g_t)))
                     self._cat_disentangle_target(token, peer)
 
+    def run_dynamic(self):
+        """'dynamic' comm mode: semiclassical inverse QFT, zero e-bits.
+
+        Each node owns a PRIVATE QStream holding only its own data qubits (the
+        Fourier input is a product state and nothing quantum crosses a node),
+        so the simulated state is 2^(2m) per node instead of the joint
+        2^(2(n+2P)). Per shot: receive every bit of every higher node (each
+        sender emits in descending global order, so per-channel FIFO order
+        matches), then for each own qubit from the highest down apply the
+        classically conditioned phases, H, measure, and send the bit to every
+        lower node.
+        """
+        names = list(self.network_structure.keys())
+        n_total = self._n_total
+        base = self._g_offs[self.name]
+        higher = [p for p in names if names.index(p) > self.index]
+        lower = [p for p in names if names.index(p) < self.index]
+        outputs = []
+        for qs in self.qstream:
+            local = [qs.qubit(i) for i in range(self.data_qubits)]
+            fourier_state(local, self.theta, start_from=base)
+            bits = {}
+            for peer in higher:
+                pb = self._g_offs[peer]
+                for g in range(pb + self.network_structure[peer] - 1, pb - 1, -1):
+                    bits[g] = self.crecv(self._peer_obj[peer])
+            for lj in range(self.data_qubits - 1, -1, -1):
+                gj = base + lj
+                q = local[lj]
+                for gk in range(n_total - 1, gj, -1):
+                    if bits[gk]:
+                        RZ(q, -np.pi / (2 ** (gk - gj)))
+                H(q)
+                b = q.measure()
+                bits[gj] = b
+                for peer in lower:
+                    self.csend(self._peer_obj[peer], b)
+            outputs.append([bits[base + i] for i in range(self.data_qubits)])
+        self.output(outputs)
+
     def run(self):
+        if self.comm_mode == "dynamic":
+            return self.run_dynamic()
         outputs = []
         for qs in self.qstream:
             local = self._my_local(qs)
@@ -228,6 +270,8 @@ def expected_ebits(node_qubits, comm_mode):
         for j in range(size):
             owner[acc + j] = node_i
         acc += size
+    if comm_mode == "dynamic":
+        return 0
     if comm_mode == "basic":
         return sum(1 for c in range(n) for t in range(c) if owner[c] != owner[t])
     return sum(len({owner[t] for t in range(c) if owner[t] != owner[c]})
@@ -258,15 +302,20 @@ def run_DQFT_squanch(theta, node_qubits, node_names, shots=1, verbose=False,
     # memory and time grow with the total system, not per node. The previous
     # per-node-QStream version was cheap precisely because it was not
     # simulating the joint state.
-    system_size = sum(node_qubits) + 2 * P
-    shared_stream = QStream(system_size, shots)
-    qsystem_lock = multiprocessing.Lock()
+    if comm_mode == "dynamic":
+        # No entanglement crosses a node: one private stream per node, no lock.
+        streams = [QStream(nq, shots) for nq in node_qubits]
+        qsystem_lock = None
+    else:
+        system_size = sum(node_qubits) + 2 * P
+        streams = [QStream(system_size, shots)] * P
+        qsystem_lock = multiprocessing.Lock()
     out = Agent.shared_output()
 
     # Build agents
     nodes = {
         name: QFTNode(
-            shared_stream, out,
+            streams[i], out,
             name=name,
             peers=[n for n in node_names if n != name],
             network_structure=network,
@@ -306,12 +355,17 @@ if __name__ == "__main__":
     parser.add_argument('--theta', type=float, required=True, help='Initial angle theta')
     parser.add_argument('--shots', type=int, required=True, help='Number of shots')
     parser.add_argument('--comm_mode', type=str, default='packed',
-                        choices=['basic', 'packed'],
-                        help="Communication schedule. 'packed' shares one "
+                        choices=['basic', 'packed', 'dynamic'],
+                        help="Communication schedule. 'dynamic' is the "
+                             "semiclassical iQFT (zero e-bits, private "
+                             "per-node streams). 'packed' shares one "
                              "teleportation across a whole column of gates; "
                              "'basic' uses one per cross-node gate.")
 
     # Parse the arguments
+    parser.add_argument('--noise', type=str, default='none', choices=['none'],
+                        help="SQUANCH runs noiseless here; accepted so the "
+                             "scaffolding can pass the axis uniformly.")
     args = parser.parse_args()
     
     emulator = "squanch"
@@ -366,6 +420,7 @@ if __name__ == "__main__":
         theta=theta, shots=shots, execution_time=execution_time,
         current_kb=current / 1024, peak_kb=peak / 1024,
         result=sorted_counts, algorithm="qft", fidelity=fidelity,
-        ebits=ebits_used, comm_mode=args.comm_mode, noise="none",
+        ebits=ebits_used, comm_mode=args.comm_mode, noise=args.noise,
+        emulator_version=package_version("squanch"),
     )
     print(f"Wrote {csv_file_path}")

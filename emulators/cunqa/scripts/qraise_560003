@@ -1,9 +1,0 @@
-(10/06/26 01:49:36 PM) [QPU 560003_0] debug: Server bound to tcp://10.5.7.8:40297  144ms
-(10/06/26 01:49:36 PM) [QPU 560003_1] debug: Server bound to tcp://10.5.7.8:35933  144ms
-srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
-srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
-slurmstepd-c7-8: error: *** JOB 560003 ON c7-8 CANCELLED AT 2026-10-06T13:59:52 DUE TO TIME LIMIT ***
-slurmstepd-c7-8: error: *** STEP 560003.1 ON c7-8 CANCELLED AT 2026-10-06T13:59:52 DUE TO TIME LIMIT ***
-slurmstepd-c7-8: error: *** STEP 560003.0 ON c7-8 CANCELLED AT 2026-10-06T13:59:52 DUE TO TIME LIMIT ***
-srun: error: c7-8: task 0: Terminated
-srun: Terminating StepId=560003.0

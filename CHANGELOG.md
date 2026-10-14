@@ -1,5 +1,73 @@
 # Changelog
 
+## [Unreleased] - campaign-v1 preparation
+
+Everything needed to produce the paper's results as one traceable campaign
+(see docs/CAMPAIGN.md). Results produced before this point are superseded.
+
+### Added
+- **`dynamic` comm mode on Qiskit Aer, SQUANCH and SquidASM** (CUNQA already
+  had it): semiclassical inverse QFT, zero e-bits. SQUANCH uses private
+  per-node streams in this mode (no joint density matrix). Interlin-q cannot
+  support it (it partitions the circuit itself).
+  Verified: exact output at non-palindromic exact theta for 2-4 nodes on Aer
+  and SQUANCH; theta = 0.33 fidelities within ideal-sampling spread (Aer
+  20000 shots, SQUANCH 3000 shots at n = 7, 8, 10). SquidASM: offline mock
+  harness (tests/test_squidasm_dynamic_mock.py) that runs the real program
+  generators with a NumPy backend; it catches a sign error in the correction
+  angle. **Still needs a live NetSquid check at an exact theta.**
+- **Noise is an explicit sweep axis**: `noise:` in the config, `--noise` in
+  every template and script, `SUPPORTED_NOISE` capability matrix.
+  `write_result_row` no longer defaults to "depolarizing".
+- **Provenance**: `Campaign`, `Code Commit`, `Emulator Version` columns.
+  job_creator.py stamps DQC_COMMIT/DQC_CAMPAIGN into every job script and
+  refuses a dirty tree (`--allow-dirty` for tests only).
+- **Shots in the results filename** (a 100-shot run had overwritten a
+  1000-shot run of the same configuration).
+- **Feasibility model in job_creator.py**: per-job memory request
+  (`{{MEM_GB}}`) from the size of the simulated state, `max_mem_gb`, and
+  per-emulator caps (`max_nodes`, `max_state_qubits`). Every exclusion is
+  printed with its reason. `--dry-run` prints the plan only.
+- `configs/campaign_v1_wave1_noiseless.yaml` (840 jobs) and
+  `configs/campaign_v1_wave2_noisy.yaml` (420 jobs); per-wave manifests in
+  `campaigns/<campaign>/`.
+- `scripts/ideal_baseline.py`: expected fidelity of an ideal N-shot sample
+  per (n, theta, shots) -> `results/baselines/ideal_sampling.csv`.
+- `scripts/campaign_status.py`: progress per (emulator, mode, noise),
+  commit check, noiseless results below the ideal-sampling interval,
+  missing jobs, queue-aware `--submit`.
+- `docs/CAMPAIGN.md`: the campaign procedure.
+- Tests: tests/test_campaign_tools.py (templates vs scripts vs capability
+  matrix, plan consistency, baseline), tests/test_squidasm_dynamic_mock.py.
+
+### Fixed
+- **Interlin-q: every sweep job failed.** The template passed `--comm_mode`,
+  which the script did not accept. It now takes `--comm_mode native` and
+  `--noise none` and records both (rows were labelled `packed` and
+  `depolarizing`).
+- **SquidASM: NameError after every simulation.** The main block used an
+  undefined `total_qubits` to decode results (introduced by the hygiene
+  pass); now `num_qubits`, with a shape assertion.
+- **SquidASM noise was undocumented and unlabelled.** `config_template.yaml`
+  was headed "Perfect ... no noise" but sets 1%/10% gate depolarising, link
+  fidelity 0.9 and finite T1/T2, and was used for every run; rows were
+  labelled by the writer's default. Now `--noise none` uses
+  `config-QFT-noiseless.yaml` and `--noise device` the noisy template, whose
+  header now says what it is. Check which one the EuroQHPC numbers used.
+- SQUANCH rows wrote `noise="none"` correctly but SQUANCH quantum modes were
+  unbounded in the sweep; at 100 shots a 10-qubit density matrix takes ~45
+  min (measured), 12 qubits ~30 h (extrapolated), so they are capped.
+
+### Findings for the paper
+- SQUANCH's earlier apparent scalability came from not simulating
+  inter-node entanglement at all. Simulating it correctly (one dense density
+  matrix, full-size gate operators) limits SQUANCH's quantum modes to
+  `n + 2*nodes <= 10`; its `dynamic` mode, with no entanglement across nodes,
+  runs the whole grid.
+- The 100-shot fidelity ceiling depends on how close theta * 2^n is to an
+  integer, not on n monotonically: 0.91-0.99 for theta = 0.33, 0.66 over
+  n = 4..20, exactly 1 for theta = 0.
+
 ## [Unreleased] - CUNQA integration against 3.0.0
 
 Rewrites `emulators/cunqa/scripts/qft_multinode.py` against the CUNQA 3.0.0

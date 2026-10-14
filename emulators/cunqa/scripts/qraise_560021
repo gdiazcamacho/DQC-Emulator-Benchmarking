@@ -1,7 +1,0 @@
-(10/06/26 02:14:14 PM) [QPU 560021_1] debug: Server bound to tcp://10.5.7.3:37179  46ms
-(10/06/26 02:14:14 PM) [QPU 560021_0] debug: Server bound to tcp://10.5.7.3:36543  54ms
-(10/06/26 02:14:15 PM) [QPU 560021_1] error: There has happened an error executing the circuit, the server keeps on iterating.  997ms
-(10/06/26 02:14:15 PM) [QPU 560021_1] error: Message of the error: Gate p not supported by Aer simulator.  0ms
-slurmstepd-c7-3: error: *** JOB 560021 ON c7-3 CANCELLED AT 2026-10-06T14:44:22 DUE TO TIME LIMIT ***
-srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
-slurmstepd-c7-3: error: *** STEP 560021.0 ON c7-3 CANCELLED AT 2026-10-06T14:44:22 DUE TO TIME LIMIT ***

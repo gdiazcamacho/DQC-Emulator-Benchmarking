@@ -1,4 +1,7 @@
-# Perfect 2 node network, no noise from either computation on the nodes or communication between nodes
+# NOISY "device" network, used for --noise device: 1% / 10% single/two-qubit
+# gate depolarising, depolarising links with fidelity 0.9, finite T1/T2.
+# (Previously headed "Perfect ... no noise", which it never was.)
+# The noiseless network for --noise none is config-QFT-noiseless.yaml.
 qdevice_cfg: &qdevice_cfg
   # num_qubits: 2
   T1: 10_000_000_000

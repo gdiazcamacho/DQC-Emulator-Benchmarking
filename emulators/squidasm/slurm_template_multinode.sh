@@ -5,7 +5,12 @@
 #SBATCH --time=06:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem-per-cpu=4G
+#SBATCH --mem={{MEM_GB}}G
+
+# Provenance stamped by scripts/job_creator.py; written into every results row.
+export DQC_COMMIT={{COMMIT}}
+export DQC_CAMPAIGN={{CAMPAIGN}}
+export LC_ALL=C
 
 # Load the necessary modules
 module purge
@@ -21,7 +26,8 @@ python ../scripts/{{ALGORITHM}}_multinode.py \
     --num_nodes={{NUM_NODES}} \
     --theta={{THETA}} \
     --shots={{SHOTS}} \
-    --comm_mode={{COMM_MODE}}
+    --comm_mode={{COMM_MODE}} \
+    --noise={{NOISE}}
 
 # Summarize resource usage with seff
 seff $SLURM_JOBID

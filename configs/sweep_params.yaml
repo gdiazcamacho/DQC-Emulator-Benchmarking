@@ -1,3 +1,4 @@
+# Ad-hoc sweep. Campaign runs use configs/campaign_v1_*.yaml (docs/CAMPAIGN.md).
 # Emulators to benchmark. Directory names under emulators/
 emulators:
   - qiskit_aer
@@ -15,6 +16,10 @@ algorithms:
 #   packed  - cat-entangle/disentangle packing (one teleportation per control)
 #   dynamic - deferred-measurement / semiclassical iQFT (zero e-bits)
 #   native  - emulator partitions and teleports on its own (not user-controlled)
+# Error model(s). See scripts/job_creator.py SUPPORTED_NOISE.
+noise:
+  - none
+
 comm_modes:
   - basic
   - packed

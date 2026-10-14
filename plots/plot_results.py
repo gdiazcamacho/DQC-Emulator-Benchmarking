@@ -13,7 +13,8 @@ from matplotlib.lines import Line2D
 
 
 
-def parse_csv_results(base_dir, algorithm=None, comm_mode=None, noise=None):
+def parse_csv_results(base_dir, algorithm=None, comm_mode=None, noise=None,
+                      campaign=None):
     """Load every results CSV under base_dir/<emulator>/results/.
 
     Results are now identified by SIX coordinates:
@@ -59,6 +60,11 @@ def parse_csv_results(base_dir, algorithm=None, comm_mode=None, noise=None):
     if "Noise" not in combined_df.columns:
         combined_df["Noise"] = "depolarizing"
     combined_df["Noise"] = combined_df["Noise"].fillna("depolarizing")
+    # Provenance columns (campaign-v1 onwards); older rows predate them.
+    for col in ("Campaign", "Code Commit", "Emulator Version"):
+        if col not in combined_df.columns:
+            combined_df[col] = ""
+        combined_df[col] = combined_df[col].fillna("")
     combined_df["Algorithm"] = combined_df["Algorithm"].fillna("qft")
     combined_df["Comm Mode"] = combined_df["Comm Mode"].fillna("packed")
 
@@ -68,10 +74,16 @@ def parse_csv_results(base_dir, algorithm=None, comm_mode=None, noise=None):
         combined_df = combined_df[combined_df["Comm Mode"] == comm_mode]
     if noise is not None:
         combined_df = combined_df[combined_df["Noise"] == noise]
+    if campaign is not None:
+        combined_df = combined_df[combined_df["Campaign"] == campaign]
 
     # Warn loudly rather than silently averaging across modes
     key = ["Emulator", "Algorithm", "Comm Mode", "Noise", "Nodes", "Num Qubits",
-           "Theta"]
+           "Theta", "Shots"]
+    n_commits = combined_df["Code Commit"].replace("", np.nan).nunique()
+    if n_commits > 1:
+        print(f"[warn] rows from {n_commits} different code commits loaded; "
+              f"a campaign should come from one commit.")
     dupes = combined_df.duplicated(subset=key, keep=False)
     n_noise = combined_df["Noise"].nunique()
     if n_noise > 1:

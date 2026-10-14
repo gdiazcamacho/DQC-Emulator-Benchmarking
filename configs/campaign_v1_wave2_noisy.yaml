@@ -1,0 +1,15 @@
+# Campaign v1, wave 2: emulators with a physical noise model only.
+# Separate figure; never mixed with wave 1 (the Noise column differs).
+campaign: campaign-v1
+
+emulators: [qiskit_aer, squidasm]
+algorithms: [qft]
+comm_modes: [basic, packed, dynamic]
+noise: [depolarizing, device]   # Aer: depolarizing; SquidASM: device (gates + links)
+
+num_qubits_range: [4, 6, 8, 10, 12, 14, 16, 18, 20]
+num_nodes_range: [1, 2, 4, 8]
+theta_range: [0.0, 0.33, 0.66]
+shots: 100
+min_qubits_per_node: 2
+max_mem_gb: 120

@@ -199,7 +199,8 @@ def test_legacy_packed_boolean_still_infers_comm_mode():
         names = {}
         for packed, label in ((True, "packed"), (False, "basic")):
             kwargs = dict(_BASE)
-            path = write_result_row(algorithm="qft", packed=packed, **kwargs)
+            path = write_result_row(algorithm="qft", packed=packed, noise="none",
+                                    **kwargs)
             dest = os.path.join(tmp, os.path.basename(path))
             shutil.move(path, dest)
             names[label] = os.path.basename(dest)
@@ -224,7 +225,7 @@ def test_unknown_comm_mode_raises():
     try:
         kwargs = dict(_BASE)
         try:
-            write_result_row(algorithm="qft", comm_mode="pakced",
+            write_result_row(algorithm="qft", comm_mode="pakced", noise="none",
                              path=os.path.join(tmp, "x.csv"), **kwargs)
         except ValueError:
             return
@@ -245,6 +246,60 @@ def test_unknown_noise_raises():
             return
         raise AssertionError("unknown noise setting was accepted")
     finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_missing_noise_raises():
+    """No default error model: a default of "depolarizing" previously
+    mislabelled noiseless SQUANCH and Interlin-q rows."""
+    tmp = tempfile.mkdtemp()
+    try:
+        kwargs = dict(_BASE)
+        try:
+            write_result_row(algorithm="qft", comm_mode="packed",
+                             path=os.path.join(tmp, "x.csv"), **kwargs)
+        except ValueError:
+            return
+        raise AssertionError("a row without an explicit noise setting was written")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_shots_changes_the_filename():
+    """Regression: a 100-shot SLURM run overwrote a 1000-shot interactive run
+    of the same configuration because shots were not in the filename."""
+    tmp = tempfile.mkdtemp()
+    try:
+        names = {sh: _write(tmp, comm_mode="packed", noise="none", shots=sh)
+                 for sh in (100, 1000)}
+        assert names[100] != names[1000], names
+        assert len(os.listdir(tmp)) == 2, "one file overwrote the other"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_provenance_is_recorded():
+    tmp = tempfile.mkdtemp()
+    old = {k: os.environ.get(k) for k in ("DQC_COMMIT", "DQC_CAMPAIGN")}
+    try:
+        os.environ["DQC_COMMIT"] = "abc123def456"
+        os.environ["DQC_CAMPAIGN"] = "campaign-v1"
+        path = os.path.join(tmp, "row.csv")
+        kwargs = dict(_BASE)
+        write_result_row(algorithm="qft", comm_mode="packed", noise="none",
+                         path=path, emulator_version="qiskit-aer==0.17.1",
+                         **kwargs)
+        header, row = _read_row(path)
+        cells = dict(zip(header, row))
+        assert cells["Code Commit"] == "abc123def456", cells
+        assert cells["Campaign"] == "campaign-v1", cells
+        assert cells["Emulator Version"] == "qiskit-aer==0.17.1", cells
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         shutil.rmtree(tmp, ignore_errors=True)
 
 

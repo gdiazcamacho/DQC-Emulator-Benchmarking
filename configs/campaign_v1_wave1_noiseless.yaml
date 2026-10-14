@@ -1,0 +1,26 @@
+# Campaign v1, wave 1: every emulator, noiseless.
+# Correctness and cost for each (emulator, communication mode) on one footing.
+# Generate from a clean checkout of the campaign tag:
+#   python scripts/job_creator.py configs/campaign_v1_wave1_noiseless.yaml
+campaign: campaign-v1
+
+emulators: [qiskit_aer, squidasm, squanch, cunqa, interlin-q]
+algorithms: [qft]
+comm_modes: [basic, packed, dynamic, native]   # unsupported pairs are excluded with a reason
+noise: [none]
+
+num_qubits_range: [4, 6, 8, 10, 12, 14, 16, 18, 20]
+num_nodes_range: [1, 2, 4, 8]
+theta_range: [0.0, 0.33, 0.66]
+shots: 100                    # fidelity read against results/baselines/ideal_sampling.csv
+min_qubits_per_node: 2
+
+# Points that would run for days or need more memory than we will request.
+caps:
+  cunqa:                      # quantum_comm simulates ONE global state; 8 nodes = hours per point
+    basic:  {max_nodes: 4}
+    packed: {max_nodes: 4}
+  squanch:                    # one dense density matrix over n + 2*nodes qubits, full-size gate
+    basic:  {max_state_qubits: 10}   # operators: 10 -> ~30 s/shot (measured), 12 -> ~20 min/shot (extrapolated)
+    packed: {max_state_qubits: 10}
+max_mem_gb: 120               # per job; QMIO nodes have 256 GB
