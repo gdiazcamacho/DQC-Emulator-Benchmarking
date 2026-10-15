@@ -13,7 +13,21 @@ from matplotlib.lines import Line2D
 
 
 
-def parse_csv_results(base_dir):
+def parse_csv_results(base_dir, algorithm=None, comm_mode=None, noise=None,
+                      campaign=None):
+    """Load every results CSV under base_dir/<emulator>/results/.
+
+    Results are now identified by SIX coordinates:
+        (Emulator, Algorithm, Comm Mode, Nodes, Num Qubits, Theta)
+
+    CSVs written before the Algorithm/Comm Mode axes existed are back-filled
+    with ('iqft', 'packed'), which is what those runs actually were. Pass
+    algorithm=/comm_mode= to filter, or leave them None to load everything.
+
+    IMPORTANT: downstream helpers assume ONE row per coordinate tuple. If you
+    load several comm modes at once and then call a helper that does not filter
+    on Comm Mode, it will silently pick an arbitrary one.
+    """
     data_frames = []
 
     for emulator_dir in os.listdir(base_dir):
@@ -25,8 +39,67 @@ def parse_csv_results(base_dir):
                     df = pd.read_csv(file_path)
                     data_frames.append(df)
 
-    # Concatenate all data frames
+    if not data_frames:
+        raise FileNotFoundError(f"No result CSVs found under {base_dir}")
+
     combined_df = pd.concat(data_frames, ignore_index=True)
+
+    # Back-compatibility with pre-refactor CSVs
+    if "Algorithm" not in combined_df.columns:
+        combined_df["Algorithm"] = "qft"
+    if "Comm Mode" not in combined_df.columns:
+        # Rows predating the axis: derive from the legacy Packed boolean where
+        # present, else assume packed (what those runs actually were).
+        if "Packed" in combined_df.columns:
+            combined_df["Comm Mode"] = combined_df["Packed"].map(
+                {True: "packed", False: "basic", "True": "packed", "False": "basic"}
+            ).fillna("packed")
+        else:
+            combined_df["Comm Mode"] = "packed"
+    # Runs predating the Noise column ALWAYS applied the depolarizing model.
+    if "Noise" not in combined_df.columns:
+        combined_df["Noise"] = "depolarizing"
+    combined_df["Noise"] = combined_df["Noise"].fillna("depolarizing")
+    # Provenance columns (campaign-v1 onwards); older rows predate them.
+    for col in ("Campaign", "Code Commit", "Emulator Version"):
+        if col not in combined_df.columns:
+            combined_df[col] = ""
+        combined_df[col] = combined_df[col].fillna("")
+    combined_df["Algorithm"] = combined_df["Algorithm"].fillna("qft")
+    combined_df["Comm Mode"] = combined_df["Comm Mode"].fillna("packed")
+
+    if algorithm is not None:
+        combined_df = combined_df[combined_df["Algorithm"] == algorithm]
+    if comm_mode is not None:
+        combined_df = combined_df[combined_df["Comm Mode"] == comm_mode]
+    if noise is not None:
+        combined_df = combined_df[combined_df["Noise"] == noise]
+    if campaign is not None:
+        combined_df = combined_df[combined_df["Campaign"] == campaign]
+
+    # Warn loudly rather than silently averaging across modes
+    key = ["Emulator", "Algorithm", "Comm Mode", "Noise", "Nodes", "Num Qubits",
+           "Theta", "Shots"]
+    n_commits = combined_df["Code Commit"].replace("", np.nan).nunique()
+    if n_commits > 1:
+        print(f"[warn] rows from {n_commits} different code commits loaded; "
+              f"a campaign should come from one commit.")
+    dupes = combined_df.duplicated(subset=key, keep=False)
+    n_noise = combined_df["Noise"].nunique()
+    if n_noise > 1:
+        print(f"[warn] {n_noise} noise settings loaded "
+              f"({sorted(combined_df['Noise'].unique())}). Fidelity is not "
+              f"comparable across them; filter with noise=.")
+    n_modes = combined_df["Comm Mode"].nunique()
+    if n_modes > 1:
+        print(f"[warn] {n_modes} communication modes loaded "
+              f"({sorted(combined_df['Comm Mode'].unique())}). "
+              f"Filter with comm_mode= before plotting, or repetitions and "
+              f"modes will be conflated.")
+    if dupes.any():
+        print(f"[info] {dupes.sum()} rows share a coordinate tuple "
+              f"(treated as repetitions).")
+
     return combined_df
 
 def truncate_colormap(cmap, minval=0.0, maxval=0.8, n=100):
@@ -47,6 +120,8 @@ def time_memory_vs_qubits(
     figsize=(16, 8),
     linewidth=2.0,
     alpha=0.95,
+    comm_mode=None,
+    algorithm=None,
 ):
     """
     Side-by-side plot:
@@ -57,8 +132,20 @@ def time_memory_vs_qubits(
     Error bars: mean +- std over repetitions.
     """
 
+    # Restrict to one algorithm / communication mode before aggregating.
+    # Without this, the groupby('Num Qubits').agg(['mean','std']) below would
+    # average ACROSS modes and report their spread as if it were run-to-run
+    # variance.
+    if comm_mode is not None:
+        df = df[df["Comm Mode"] == comm_mode]
+    if algorithm is not None:
+        df = df[df["Algorithm"] == algorithm]
+    if df["Comm Mode"].nunique() > 1:
+        print("[warn] time_memory_vs_qubits called with multiple comm modes; "
+              "error bars will conflate modes with repetitions.")
+
     # Desired emulator order and normalization
-    emulator_order = ["qiskit-aer", "squidasm", "squanch", "interlin-q"]
+    emulator_order = ["qiskit-aer", "squidasm", "squanch", "interlin-q", "cunqa"]
     def norm_name(name): return str(name).lower().replace("_", "-")
 
     # Filter and order DataFrame emulators
@@ -76,6 +163,7 @@ def time_memory_vs_qubits(
         "qiskit-aer": truncate_colormap(cm.Purples_r, 0.0, 0.6),
         "interlin-q": truncate_colormap(cm.Greens_r, 0.0, 0.6),
         "squanch": truncate_colormap(cm.Oranges_r, 0.0, 0.8),
+        "cunqa": truncate_colormap(cm.Reds_r, 0.0, 0.6),
     }
 
     # Custom markers and line styles
@@ -84,6 +172,7 @@ def time_memory_vs_qubits(
         "squidasm":   ('s', 'dashdot'),
         "squanch":    ('^', 'dashed'),
         "interlin-q": ('D', 'dotted'),
+        "cunqa": ('v', (0, (3, 1, 1, 1))),
     }
 
     # Helper to sample cmap evenly for k steps
@@ -161,7 +250,18 @@ def time_memory_vs_qubits(
     else:
         plt.show()
 
-def fidelity_emulator(emulator, df):
+def fidelity_emulator(emulator, df, comm_mode=None, algorithm=None, noise=None):
+    """Compare distributed vs single-node fidelity for one emulator.
+
+    The queries below match on (Emulator, Num Qubits, Nodes, Theta) only, so
+    with several comm modes or noise settings loaded they return multiple rows
+    and pick one arbitrarily. Filter first."""
+    if comm_mode is not None:
+        df = df[df["Comm Mode"] == comm_mode]
+    if algorithm is not None:
+        df = df[df["Algorithm"] == algorithm]
+    if noise is not None:
+        df = df[df["Noise"] == noise]
 
     qubit_values = df["Num Qubits"].unique()
     theta_values = df["Theta"].unique()
@@ -242,10 +342,18 @@ def compute_full_fidelity(counts, nq, theta):
     fid = np.sum(np.sqrt(Psim_full * Pideal_full))**2
     return fid
 
-def fidelity_per_nq_nodes(emulator, df):
+def fidelity_per_nq_nodes(emulator, df, comm_mode=None, algorithm=None):
     """
     Loop over all (nq, nodes) tuples and compute mean fidelity across thetas.
+
+    comm_mode/algorithm restrict the selection. Leaving them None is only safe
+    when df already contains a single mode: otherwise the per-row query below
+    matches several rows and .iloc[0] would pick one arbitrarily.
     """
+    if comm_mode is not None:
+        df = df[df["Comm Mode"] == comm_mode]
+    if algorithm is not None:
+        df = df[df["Algorithm"] == algorithm]
     qubit_values = sorted(df["Num Qubits"].unique())
     node_values  = sorted(df["Nodes"].unique())
     theta_values = sorted(df["Theta"].unique())
@@ -262,6 +370,11 @@ def fidelity_per_nq_nodes(emulator, df):
                 )
                 if row.empty:
                     continue
+                if len(row) > 1 and row["Comm Mode"].nunique() > 1:
+                    print(f"[warn] {emulator} nq={nq} nodes={nodes} theta={theta}: "
+                          f"{len(row)} rows across "
+                          f"{sorted(row['Comm Mode'].unique())}; using the first. "
+                          f"Pass comm_mode= to disambiguate.")
 
                 counts = ast.literal_eval(row.iloc[0]["Result"])
 

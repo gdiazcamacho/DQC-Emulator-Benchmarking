@@ -1,7 +1,6 @@
 import logging
 import numpy as np
 import argparse
-import csv
 
 from netqasm.sdk import Qubit
 from typing import List
@@ -14,20 +13,58 @@ import os
 import time
 import tracemalloc
 
+# --- shared helpers -----------------------------------------------------------
+# Anchor on this file's location so the script runs identically from the repo
+# root, from this directory, or from a SLURM working directory.
+import os as _os, sys as _sys
+_REPO_ROOT = _os.path.abspath(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", ".."))
+if _REPO_ROOT not in _sys.path:
+    _sys.path.insert(0, _REPO_ROOT)
+from common.dqc_common import (
+    distribute_qubits, fidelity_from_counts, write_result_row, package_version,
+)
+# ------------------------------------------------------------------------------
+
 from squidasm.run.stack.run import run
 from squidasm.sim.stack.program import ProgramContext
 from squidasm.run.stack.config import StackNetworkConfig
 # from squidasm.run.stack.common import AllocError
-from AbstractNode import AbstractNode, CRz
+from AbstractNode import AbstractNode, CP
 from copy import deepcopy
 import yaml
 
 ####################################################
 
+def make_noiseless(config_yaml):
+    """Zero every noise source of a network config IN PLACE, keeping its
+    topology, link/clink types and timings.
+
+    --noise none used to load config-QFT-noiseless.yaml, whose `perfect` link
+    type the installed netsquid_netbuilder cannot route ("Could not calculate a
+    shortest route", seen on QMIO 2026-10-14). Deriving the noiseless network
+    from the same template as --noise device means the two settings differ
+    ONLY in noise parameters:
+      * gate depolarising probabilities -> 0
+      * T1 = T2 = 0  (SquidASM generic qdevice: 0 disables decoherence)
+      * link EPR fidelity -> 1 (depolarise link; t_cycle/prob_success kept)
+    """
+    for stack in config_yaml["stacks"]:
+        q = stack["qdevice_cfg"]
+        q["single_qubit_gate_depolar_prob"] = 0.0
+        q["two_qubit_gate_depolar_prob"] = 0.0
+        q["T1"] = 0
+        q["T2"] = 0
+    for link in config_yaml["links"]:
+        if "fidelity" in link.get("cfg", {}):
+            link["cfg"]["fidelity"] = 1.0
+    return config_yaml
+
+
 def setup_network_yaml(
         network_structure: dict,
         config_template: str = "config_template.yaml",
-        temp_config_file: str = ".config_file.yaml"):
+        temp_config_file: str = ".config_file.yaml",
+        noiseless: bool = False):
 
     node_names, node_qubits = list(zip(*network_structure.items()))
     num_nodes = len(node_qubits)
@@ -38,6 +75,8 @@ def setup_network_yaml(
             config_yaml = (yaml.safe_load(stream)).copy()
         except yaml.YAMLError as exc:
             print(exc)
+    if noiseless:
+        make_noiseless(config_yaml)
 
     # Copy default config from template
     stack0 = config_yaml["stacks"][0].copy()
@@ -77,22 +116,6 @@ def setup_network_yaml(
             print(exc)
     return StackNetworkConfig.from_file(temp_config_file)
 
-def distribute_qubits(num_qubits: int, num_nodes: int):
-    """Distribute qubits across nodes, assigning the remainder to the last node."""
-    base = (num_qubits + num_nodes - 1) // num_nodes  # ceiling division
-    qubits = [base] * num_nodes
-    total = sum(qubits)
-    over = total - num_qubits
-
-    # Remove 1 from the last 'over' nodes (starting from the end)
-    for i in range(over):
-        qubits[-(i + 1)] -= 1
-        
-    if any(q <= 1 for q in qubits):
-        print("Warning: One or more nodes have ≤ 1 qubit.")
-        
-    return qubits
-
 def node_distance(node1, node2, network_structure):
     return max( 
         sum(
@@ -116,11 +139,13 @@ class QFTNode(AbstractNode):
             *args,
             theta,
             network_structure,
+            comm_mode: str = "packed",
             verbose: bool = False,
             **kwargs
             ):
 
         super().__init__(*args, **kwargs)
+        self.comm_mode = comm_mode
         self.theta = theta
         self.dim_qft = self.max_qubits
         self.network_structure = network_structure
@@ -154,7 +179,7 @@ class QFTNode(AbstractNode):
                 print(f"{self.name}: (F) Rz({theta*np.pi*2**(i+1+start_from)}, {i})")
 
     def controlled_phase_gradient_source(self, qubits: List[Qubit], peer: str, verbose: bool = False):
-        """Send control to peer's qubits using CAT entanglement and apply CRz from source side."""
+        """Send control to peer's qubits using CAT entanglement and apply CP from source side."""
         csocket = self.context.csockets[peer]
         
         # Send how many control qubits I have
@@ -165,7 +190,7 @@ class QFTNode(AbstractNode):
         yield from self.connection.flush()
         if self.verbose:
             print("\n")
-        # For each control qubit, entangle and apply remote CRz via CAT
+        # For each control qubit, entangle and apply remote CP via CAT
         for q in qubits:
             yield from self.cat_entangle_source(q, peer)
             if self.verbose:
@@ -175,7 +200,7 @@ class QFTNode(AbstractNode):
                 print(f"{self.name}:cat disentangle to {peer}")
 
     def controlled_phase_gradient_target(self, qubits: List[Qubit], peer: str, verbose: bool = False):
-        """Receive control from peer's qubits and apply CRz locally."""
+        """Receive control from peer's qubits and apply CP locally."""
         csocket = self.context.csockets[peer]
         if self.verbose:
             print(f"{self.name}: waiting for num_peer_qubits from {peer}")
@@ -191,12 +216,64 @@ class QFTNode(AbstractNode):
                 distance = node_distance(self.name, peer, self.network_structure)
 
                 angle = -np.pi / (2 ** (i + num_own_qubits - j + distance))
-                CRz(epr, q, angle=angle)
+                CP(epr, q, angle=angle)
                 if self.verbose:
-                    print(f"{self.name}: (PG) CRz({i}, {j}) = -p/{2**(i + num_own_qubits - j + distance)}")
+                    print(f"{self.name}: (PG) CP({i}, {j}) = -p/{2**(i + num_own_qubits - j + distance)}")
             yield from self.cat_disentangle_target(epr, peer)
 
+    def run_dynamic(self, context: ProgramContext):
+        """'dynamic' comm mode: semiclassical inverse QFT, zero e-bits.
+
+        No EPR pair is ever requested. Each node first receives, over its
+        classical sockets, every measured bit of every higher node (a sender
+        emits its bits in descending global order, so per-socket FIFO order
+        matches the order read here). It then processes its own qubits from
+        the highest down: classically conditioned Z rotations for every higher
+        qubit whose bit is 1, H, measure, flush (the bit must be a Python int
+        before it can condition anything or be sent), and send the bit to
+        every lower node. Angles and qubit order follow inverse_QFT() and the
+        global offsets used by _fourier_state().
+        """
+        self.context = context
+        names = list(self.network_structure.keys())
+        my_index = names.index(self.name)
+        offsets = {nm: sum(list(self.network_structure.values())[:i])
+                   for i, nm in enumerate(names)}
+        n_total = sum(self.network_structure.values())
+        base = offsets[self.name]
+        higher = [p for p in names if names.index(p) > my_index]
+        lower = [p for p in names if names.index(p) < my_index]
+
+        [self.init_qubit(i) for i in range(self.max_qubits)]
+        self._fourier_state(qubits_qft=self.qubits, theta=self.theta,
+                            start_from=base, verbose=self.verbose)
+        yield from self.connection.flush()
+
+        bits = {}
+        for peer in higher:
+            pb = offsets[peer]
+            for g in range(pb + self.network_structure[peer] - 1, pb - 1, -1):
+                msg = yield from self.context.csockets[peer].recv()
+                bits[g] = int(msg)
+
+        for lj in range(len(self.qubits) - 1, -1, -1):
+            gj = base + lj
+            q = self.qubits[lj]
+            for gk in range(n_total - 1, gj, -1):
+                if bits[gk]:
+                    q.rot_Z(angle=2 * np.pi - np.pi / (2 ** (gk - gj)))
+            q.H()
+            m = q.measure()
+            yield from self.connection.flush()
+            bits[gj] = int(m)
+            for peer in lower:
+                self.context.csockets[peer].send(str(bits[gj]))
+        yield from self.connection.flush()
+        return [bits[base + i] for i in range(len(self.qubits))]
+
     def run(self, context: ProgramContext):
+        if self.comm_mode == "dynamic":
+            return (yield from self.run_dynamic(context))
         self.context = context
 
         my_index = list(self.network_structure.keys()).index(self.name)
@@ -271,6 +348,14 @@ class QFTNode(AbstractNode):
         
         return [int(o) for o in output]
 
+def expected_ebits(node_qubits, comm_mode):
+    """Analytic e-bit cost, same convention as the other scripts:
+    packed = one EPR pair per (control qubit, lower node); dynamic = 0."""
+    if comm_mode == "dynamic":
+        return 0
+    return sum(nq * i for i, nq in enumerate(node_qubits))
+
+
 def run_DQFT(
         theta: float,
         node_qubits=[4, 4],
@@ -279,6 +364,8 @@ def run_DQFT(
         config_template="config_template.yaml",
         verbose=False,
         delete_temp_file=True,
+        comm_mode="packed",
+        noiseless=False,
     ):
 
     network_structure = {node: nq for node, nq in zip(node_names, node_qubits)}
@@ -288,7 +375,8 @@ def run_DQFT(
     cfg  = setup_network_yaml(
         network_structure=network_structure,
         config_template=config_template,
-        temp_config_file = temp_config_file
+        temp_config_file=temp_config_file,
+        noiseless=noiseless,
         )
 
     # Create program for each node
@@ -299,6 +387,7 @@ def run_DQFT(
             network_structure=network_structure,
             theta=theta,
             qubits=nq,
+            comm_mode=comm_mode,
             verbose=verbose
             )
         for name, nq in network_structure.items()
@@ -308,9 +397,11 @@ def run_DQFT(
     out = run(config=cfg, programs=programs, num_times=shots)
 
     # Delete temporary yaml
-    if delete_temp_file:
-        if os.path.exists(".config_file.yaml"):
-            os.remove(".config_file.yaml")
+    # Remove the per-run network config. (This used to delete
+    # ".config_file.yaml", a name nothing writes, so every run left a
+    # "<timestamp>-config.yaml" behind: one file per job in a campaign.)
+    if delete_temp_file and os.path.exists(temp_config_file):
+        os.remove(temp_config_file)
 
     return out
 
@@ -324,13 +415,28 @@ if __name__ == "__main__":
     parser.add_argument('--num_nodes', type=int, required=True, help='Number of nodes')    
     parser.add_argument('--theta', type=float, required=True, help='Initial angle theta')
     parser.add_argument('--shots', type=int, required=True, help='Number of shots')
+    parser.add_argument('--comm_mode', type=str, default='packed',
+                        choices=['packed', 'dynamic'],
+                        help="Communication schedule. 'packed': cat-entangle "
+                             "telegates (one EPR pair per control qubit per "
+                             "peer). 'dynamic': semiclassical iQFT over the "
+                             "classical sockets only, zero EPR pairs.")
+    parser.add_argument('--noise', type=str, default='none',
+                        choices=['none', 'device'],
+                        help="'device': config_template.yaml (1%% / 10%% gate "
+                             "depolarising, link fidelity 0.9, finite T1/T2). "
+                             "'none': the same network with every noise "
+                             "parameter zeroed (make_noiseless).")
     
     # Parse the arguments
     args = parser.parse_args()
     
     emulator = "squidasm"
     verbose = False
+    # One network template for both settings; --noise none zeroes its noise
+    # parameters (make_noiseless), so the two differ only in noise.
     config_template = '../scripts/config_template.yaml'
+    noiseless = (args.noise == "none")
     num_qubits = args.num_qubits
     num_nodes = args.num_nodes
     theta = args.theta
@@ -341,7 +447,7 @@ if __name__ == "__main__":
     # node_names = ["Alice", "Bob", "Charlie", "David"]
     
     verbose = False  # Bool
-    delete_temp_file = False  # Bool
+    delete_temp_file = True   # Bool
     
     tracemalloc.start(); start_time = time.time()  # Start memory profiling and record the start time
     
@@ -351,9 +457,11 @@ if __name__ == "__main__":
       node_qubits=node_qubits,
       node_names=node_names,
       shots=shots,
-      config_template = '../scripts/config_template.yaml',
+      config_template = config_template,
       verbose=verbose,
-      delete_temp_file=delete_temp_file
+      delete_temp_file=delete_temp_file,
+      comm_mode=args.comm_mode,
+      noiseless=noiseless,
       )
     
     execution_time = time.time() - start_time  # Calculate execution time
@@ -371,23 +479,24 @@ if __name__ == "__main__":
     # Convert each shot into a bitstring
     bitstrings = ["".join(map(str, row)) for row in combined]
     # Convert to float values (rescaled binary to [0,1))
-    num_qubits = combined.shape[1]
+    # `total_qubits` was undefined here (NameError after every simulation).
+    assert combined.shape[1] == num_qubits, (combined.shape, num_qubits)
     float_values = [int(bits, 2) / (2 ** num_qubits) for bits in bitstrings]
     # Count frequencies
     counts = dict(Counter(float_values))
     sorted_counts = dict(sorted(counts.items()))
     print(f"Phases Counts: {sorted_counts}")
     
-    # Define the CSV file path
-    csv_file_path = f"../results/{emulator}_{num_nodes}_q{num_qubits}_a{theta}.csv"
-    
-    # Write the results to a CSV file
-    with open(csv_file_path, mode='w', newline='') as file:
-      writer = csv.writer(file)
-      # Write the header
-      writer.writerow(["Emulator", "Nodes", "Num Qubits", "Theta", "Shots",
-                       "Execution Time (s)", "Current Memory (KB)", "Peak Memory (KB)", "Result"])
-      # Write the data
-      writer.writerow([emulator, num_nodes, num_qubits, theta, shots,
-                       execution_time, current / 1024, peak / 1024, sorted_counts])
+    fidelity = fidelity_from_counts(sorted_counts, num_qubits, theta)
+    print(f"Fidelity: {fidelity}")
 
+    csv_file_path = write_result_row(
+        emulator=emulator, num_nodes=num_nodes, num_qubits=num_qubits,
+        theta=theta, shots=shots, execution_time=execution_time,
+        current_kb=current / 1024, peak_kb=peak / 1024,
+        result=sorted_counts, algorithm="qft", fidelity=fidelity,
+        comm_mode=args.comm_mode, noise=args.noise,
+        ebits=expected_ebits(node_qubits, args.comm_mode),
+        emulator_version=package_version("squidasm"),
+    )
+    print(f"Wrote {csv_file_path}")

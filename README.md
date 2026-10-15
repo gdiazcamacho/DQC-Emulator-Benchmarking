@@ -30,6 +30,10 @@ Each emulator runs in its own isolated conda environment to avoid dependency con
 ```
 DQC-Emulator-Benchmarking/
 │
+├── common/
+│   └── dqc_common.py                  # Shared partitioning, fidelity and CSV helpers
+│                                      # (imported by all four emulator scripts)
+│
 ├── configs/
 │   └── sweep_params.yaml              # Parameter sweep configuration
 │
@@ -62,8 +66,16 @@ DQC-Emulator-Benchmarking/
 │   │   ├── jobs/
 │   │   └── results/
 │   │
-│   └── squanch/
-│       ├── env/environment.yml
+│   ├── squanch/
+│   │   ├── env/environment.yml
+│   │   ├── scripts/
+│   │   │   └── qft_multinode.py
+│   │   ├── slurm_template_multinode.sh
+│   │   ├── jobs/
+│   │   └── results/
+│   │
+│   └── cunqa/                          # In the sweep; shadow-validated, not yet run live
+│       ├── env/README.md               # CUNQA is built from source, not conda/pip
 │       ├── scripts/
 │       │   └── qft_multinode.py
 │       ├── slurm_template_multinode.sh
@@ -75,9 +87,40 @@ DQC-Emulator-Benchmarking/
 │   ├── job_submitter_all.sh           # Submits all jobs for all emulators
 │   └── job_submitter_one.sh           # Submits all jobs for a single emulator
 │
+├── tests/
+│   └── test_primitives.py             # Gate identities, partitioning, fidelity
+│                                      # (NumPy only; no emulator install needed)
+│
 └── plots/
     ├── plot_results.py                # Parses CSVs and generates figures
 ```
+
+---
+
+## Emulator status
+
+One algorithm (distributed inverse QFT), run with explicit communication
+schedules: `basic` (one telegate per gate), `packed` (one telegate per control
+qubit per lower node), `dynamic` (semiclassical iQFT: measure + classically
+conditioned phases, zero e-bits) and Interlin-q's own `native` partitioning.
+
+| Emulator | Comm modes | Noise models | Notes |
+|---|---|---|---|
+| Qiskit Aer | basic, packed, dynamic | none, depolarizing | Monolithic reference; models no network |
+| SquidASM | packed, dynamic | device (`config_template.yaml`), none (same network, noise zeroed) | NetSquid-based; `dynamic` validated offline with a mock harness only |
+| SQUANCH | basic, packed, dynamic | none | Quantum modes simulate one dense density matrix (`n + 2*nodes` qubits): capped at 10 qubits |
+| CUNQA 3.1.0 | basic, packed, dynamic | none | Built from source (`emulators/cunqa/env/`); quantum modes capped at 4 nodes; memory column = driver only |
+| Interlin-q | native | none | `num_qubits` must be divisible by `num_nodes` |
+
+Campaigns (the results that go in the paper) are run from a tagged clean
+checkout following [`docs/CAMPAIGN.md`](docs/CAMPAIGN.md).
+
+---|---|---|---|
+| Qiskit Aer | Yes | Yes | Reference / monolithic baseline |
+| SquidASM | Yes | Yes | NetSquid-based |
+| Interlin-q | Yes | Yes | `num_qubits` must be divisible by `num_nodes` |
+| SQUANCH | Yes | Yes | |
+| CUNQA 3.1.0 (pinned, built from source: `emulators/cunqa/env/`) | Yes (`basic`, `packed`, `dynamic`) | **No** (no noise on communication paths upstream) | Shadow-validated only (`--shadow`, `tests/test_cunqa_adapter.py`); hand-check 4q/2n on QMIO before trusting the sweep. Memory column is the driver process only. Quantum-comm points simulate ONE global state of N+M qubits; 8-node 18-20-qubit points take hours |
 
 ---
 
@@ -115,9 +158,48 @@ num_qubits_range: [4, 6, 8, 10, 12, 14, 16, 18, 20]
 num_nodes_range: [1, 2, 4, 8]
 theta_range: [0.0, 0.33, 0.66]
 shots: 100
+min_qubits_per_node: 2
 ```
 
 > **Interlin-q constraint:** `num_qubits` must be divisible by `num_nodes`.
+
+**Grid feasibility.** The sweep is a full cartesian product, so it contains
+points that are not valid distributed benchmarks:
+
+- *Impossible* — `num_qubits < num_nodes` (e.g. 4 qubits over 8 nodes). These
+  are always excluded; earlier versions accepted them and produced partitions
+  containing zero-qubit nodes.
+- *Degenerate* — a node holding a single qubit performs no local controlled
+  rotations, so the run measures communication overhead against an empty local
+  circuit. `min_qubits_per_node` controls these: `2` (default) excludes them,
+  `1` reproduces the original grid.
+
+`job_creator.py` prints every skipped combination and the reason, so the
+exclusions are visible rather than silent. With the defaults above, 336 of the
+432 grid points are emitted.
+
+### Telegate packing ablation
+
+`emulators/qiskit_aer/scripts/qft_multinode.py` accepts `--telegate_baseline`,
+which switches the distributed ladder from the packed cat-comm construction
+(one Bell pair per column) to a naive baseline (one Bell pair per individual
+gate, no packing). Not part of the sweep grid — it's a separate, small
+comparison run producing `plots/ebit_packing_ablation.png`:
+
+```bash
+python emulators/qiskit_aer/scripts/qft_multinode.py \
+    --num_qubits 8 --num_nodes 2 --theta 0.33 --shots 100                     # packed (default)
+python emulators/qiskit_aer/scripts/qft_multinode.py \
+    --num_qubits 8 --num_nodes 2 --theta 0.33 --shots 100 --telegate_baseline # baseline
+```
+
+Both write to `emulators/qiskit_aer/results/`, distinguished by the
+`Algorithm` column (`qft` vs. `qft_telegate_baseline`) so they never mix into
+the main scaling figures. The `Ebits` column records the number of Bell pairs
+consumed. In the bipartite (2-node) case this fits exactly: packed = n/2,
+baseline = (n/2)², verified against hand-derived counts at n = 4, 6, 8, 10
+before being trusted (see `CHANGELOG.md`). The multi-node case has not yet had
+the same check.
 
 ### 2. Generate SLURM job scripts
 
@@ -157,9 +239,14 @@ Activate the environment and run the script directly from its `scripts/` directo
 
 ```bash
 conda activate qiskit_conda
-cd emulators/qiskit_aer/scripts
-python qft_multinode.py --num_qubits 8 --num_nodes 2 --theta 0.33 --shots 100
+python emulators/qiskit_aer/scripts/qft_multinode.py \
+    --num_qubits 8 --num_nodes 2 --theta 0.33 --shots 100
 ```
+
+All scripts resolve paths relative to their own location, so they can be
+launched from the repository root, from their own directory, or from a SLURM
+working directory. Results are always written to
+`emulators/<name>/results/`.
 
 For SquidASM, `qft_multinode.py` auto-generates a temporary NetSquid network config at runtime from `config_template.yaml`, which must be present in the same directory.
 
@@ -167,17 +254,43 @@ For SquidASM, `qft_multinode.py` auto-generates a temporary NetSquid network con
 
 ## Output Format
 
-Each run writes a CSV to `emulators/<name>/results/<name>_<nodes>_q<qubits>_a<theta>.csv`:
+Each run writes a **single-row** CSV to
+`emulators/<name>/results/<algorithm>_<comm_mode>_<noise>_<name>_<nodes>_q<qubits>_a<theta>_s<shots>.csv`
+(every axis that can differ between two runs is in the name, so none can
+overwrite another):
 
 | Column | Description |
 |---|---|
+| `Algorithm` | Benchmark discriminator (`qft`, and future additions) |
 | `Emulator` | Emulator name |
-| `Num Qubits` | Total logical qubits |
 | `Nodes` | Number of distributed nodes |
+| `Num Qubits` | Total logical qubits |
 | `Theta` | Phase angle for Fourier state preparation |
+| `Shots` | Number of repetitions |
 | `Execution Time (s)` | Wall-clock simulation time |
+| `Current Memory (KB)` | Memory at end of run via `tracemalloc` |
 | `Peak Memory (KB)` | Peak memory via `tracemalloc` |
-| `Fidelity` | Classical fidelity vs. monolithic reference |
+| `Comm Mode` | `basic`, `packed`, `dynamic` or `native` |
+| `Noise` | Error model actually applied (`none`, `depolarizing`, `device`) |
+| `Fidelity` | Classical fidelity vs. the analytic inverse-QFT distribution; compare with `results/baselines/ideal_sampling.csv` (a perfect emulator does not score 1 at finite shots) |
+| `Ebits` | Entangled pairs consumed (0 for `dynamic`) |
+| `Packed` | Legacy boolean, derived from `Comm Mode` |
+| `Campaign`, `Code Commit`, `Emulator Version` | Provenance, stamped by `job_creator.py` |
+| `Result` | Measured phase histogram |
+
+Two conventions matter and are enforced by `common/dqc_common.write_result_row`:
+
+- **One row per run.** `plots/plot_results.py` concatenates every CSV under
+  `emulators/*/results/`, so a file with any other shape corrupts the combined
+  DataFrame silently. Auxiliary outputs that are not one-row-per-run (for
+  example cost landscapes) belong in a subdirectory such as
+  `results/landscapes/`, outside that glob.
+- **`Algorithm` is always written.** Without it, adding a second benchmark
+  contaminates the QFT figures. Files predating this column are backfilled as
+  `qft` when parsed.
+
+`Fidelity` is computed per run, at the point where the raw counts exist, rather
+than reconstructed later from the stringified histogram.
 
 ---
 
@@ -186,11 +299,34 @@ Each run writes a CSV to `emulators/<name>/results/<name>_<nodes>_q<qubits>_a<th
 Once results are collected:
 
 ```bash
-cd plots
-python plot_results.py
+python plots/plot_results.py --save-path plots/scaling_2panel
 ```
 
-The script scans all `emulators/*/results/*.csv`, aggregates them, and produces the scaling figures. An interactive version is available in `emulators/benchmark_multinode_figures.ipynb`.
+Options:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--base-dir` | repo-relative `emulators/` | Where to look for result CSVs |
+| `--algorithm` | `qft` | Which benchmark to plot |
+| `--save-path` | none (interactive) | Path prefix for saved `.png` / `.svg` |
+
+The script scans `emulators/*/results/*.csv`, filters by `Algorithm`, and
+produces the scaling and fidelity figures. An interactive version is available
+in `plots/benchmark_multinode_figures.ipynb`.
+
+---
+
+## Tests
+
+```bash
+python tests/test_primitives.py          # or: python -m pytest tests/ -v
+```
+
+The tests require only NumPy — no emulator installation and no NetSquid licence
+— so they run from a fresh clone. They cover the controlled-phase gate
+identities used by the distributed ladder, qubit partitioning, and the analytic
+inverse-QFT reference distribution against which `Fidelity` is computed. The
+Qiskit end-to-end check skips cleanly if Qiskit is absent.
 
 ---
 
@@ -243,4 +379,4 @@ This work was supported by MICINN through the European Union NextGenerationEU re
 
 ## License
 
-See `LICENSE` for details.
+Released under the MIT License. See `LICENSE` for the full text.

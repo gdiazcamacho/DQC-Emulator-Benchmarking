@@ -1,23 +1,51 @@
 cff-version: 1.2.0
-message: "If you use this software, please cite it as below."
-
-authors:
-  - family-names: "Díaz Camacho"
-    given-names: "Guillermo"
-    orcid: "https://orcid.org/0009-0007-5839-6617"
+message: "If you use this software, please cite both the software and the accompanying paper."
 
 title: "DQC Emulator Benchmarking"
-version: 1.0.0
+abstract: >-
+  A benchmarking framework for distributed quantum computing emulators, using a
+  distributed implementation of the inverse quantum Fourier transform as the
+  test case. Evaluates execution time, memory usage, and fidelity relative to a
+  monolithic baseline across SquidASM, Qiskit Aer, Interlin-q, and SQUANCH.
+
+type: software
+version: 1.1.0
+date-released: 2026-08-07
+license: MIT
+repository-code: "https://github.com/gdiazcamacho/DQC-Emulator-Benchmarking"
 url: "https://github.com/gdiazcamacho/DQC-Emulator-Benchmarking"
 
-preferred-citation:
-  type: software
-  title: "DQC Emulator Benchmarking"
+keywords:
+  - distributed quantum computing
+  - quantum Fourier transform
+  - emulator benchmarking
+  - quantum networks
+  - gate teleportation
 
+authors:
+  - family-names: "Díaz-Camacho"
+    given-names: "Guillermo"
+    orcid: "https://orcid.org/0009-0007-5839-6617"
+    affiliation: "Galicia Supercomputing Center (CESGA)"
+  # TODO: add remaining co-authors of the accompanying paper, in the paper's
+  # author order, each with ORCID and affiliation.
+
+# TODO: mint a Zenodo DOI for the release that accompanies journal submission
+# and add it here as:
+#   doi: "10.5281/zenodo.XXXXXXX"
+
+preferred-citation:
+  type: article
+  title: "Benchmarking Distributed Quantum Computing Emulators"
   authors:
-    - family-names: "Díaz Camacho"
+    - family-names: "Díaz-Camacho"
       given-names: "Guillermo"
       orcid: "https://orcid.org/0009-0007-5839-6617"
-
-  year: "2026"
-  url: "https://github.com/gdiazcamacho/DQC-Emulator-Benchmarking"
+      affiliation: "Galicia Supercomputing Center (CESGA)"
+  year: 2025
+  # arXiv preprint; update to the journal reference on acceptance.
+  identifiers:
+    - type: other
+      value: "arXiv:2512.01807"
+      description: "arXiv preprint"
+  url: "https://arxiv.org/abs/2512.01807"

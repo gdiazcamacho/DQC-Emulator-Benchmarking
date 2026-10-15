@@ -13,10 +13,21 @@ Logger.DISABLED = True
 from collections import Counter
 import string
 import argparse
-import csv
 
 import time
 import tracemalloc
+
+# --- shared helpers -----------------------------------------------------------
+# Anchor on this file's location so the script runs identically from the repo
+# root, from this directory, or from a SLURM working directory.
+import os as _os, sys as _sys
+_REPO_ROOT = _os.path.abspath(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", ".."))
+if _REPO_ROOT not in _sys.path:
+    _sys.path.insert(0, _REPO_ROOT)
+from common.dqc_common import (
+    distribute_qubits, fidelity_from_counts, write_result_row, package_version,
+)
+# ------------------------------------------------------------------------------
 ################################################################################
 
 def phase_gate(theta):
@@ -62,7 +73,7 @@ def fourier_state(q_map, theta, layers, verbose=False):
             if verbose:
                 print(op.gate, op.qids, op.gate_param)  
             ops.append(op)
-        offset += len(q_id) # Add node qubits to the offset for the next node
+        offset += len(q_map[node])  # was len(q_id): length of the id STRING ("q_0_1" -> 5)
     layers.append(Layer(ops))
     
     return layers
@@ -237,7 +248,11 @@ def controller_host_protocol(host, q_map, theta, result_container, verbose=False
                 print("\nThe estimated value of the phase is {0}".format(phase))
 
             # Store result (e.g., '000111' or similar)
-    bitstring = ''.join(str(all_bits[q]) for q in sorted(all_bits.keys()))
+    # Global qubit order = q_map order (node by node, then local index). The
+    # previous sorted(all_bits) compared id STRINGS, so with >= 11 qubits per
+    # host 'q_0_10' sorted before 'q_0_2' and scrambled the bitstring.
+    bitstring = ''.join(str(all_bits[q]) for node in computing_host_ids
+                        for q in q_map[node])
     result_container.append(bitstring)  # Mutates shared list
 
 def computing_host_protocol(host, verbose=False):
@@ -339,6 +354,12 @@ if __name__ == "__main__":
     parser.add_argument('--num_nodes', type=int, required=True, help='Number of nodes')       
     parser.add_argument('--theta', type=float, required=True, help='Initial angle theta')
     parser.add_argument('--shots', type=int, required=True, help='Number of shots')
+    # Interlin-q partitions and teleports on its own, so its schedule is not
+    # user-controlled ('native'), and it runs noiseless here. Both flags exist
+    # because job_creator passes every axis to every emulator; without them
+    # argparse rejected --comm_mode and every Interlin-q job failed.
+    parser.add_argument('--comm_mode', type=str, default='native', choices=['native'])
+    parser.add_argument('--noise', type=str, default='none', choices=['none'])
 
     # Parse the arguments
     args = parser.parse_args()
@@ -376,16 +397,15 @@ if __name__ == "__main__":
       print(f"Peak Memory Usage: {peak / 1024} KB")
       print(f"Result: {phases}")
       
-      # Define the CSV file path
-      csv_file_path = f"../results/{emulator}_{num_nodes}_q{num_qubits}_a{theta}.csv"
-      
-      # Write the results to a CSV file
-      with open(csv_file_path, mode='w', newline='') as file:
-          writer = csv.writer(file)
-          # Write the header
-          writer.writerow(["Emulator", "Nodes", "Num Qubits", "Theta", "Shots",
-                           "Execution Time (s)", "Current Memory (KB)", "Peak Memory (KB)", "Result"])
-          # Write the data
-          writer.writerow([emulator, num_nodes, num_qubits, theta, shots,
-                           execution_time, current / 1024, peak / 1024, phases])
-      
+      fidelity = fidelity_from_counts(phases, num_qubits, theta)
+      print(f"Fidelity: {fidelity}")
+
+      csv_file_path = write_result_row(
+          emulator=emulator, num_nodes=num_nodes, num_qubits=num_qubits,
+          theta=theta, shots=shots, execution_time=execution_time,
+          current_kb=current / 1024, peak_kb=peak / 1024,
+          result=phases, algorithm="qft", fidelity=fidelity,
+          comm_mode=args.comm_mode, noise=args.noise,
+          emulator_version=package_version("interlin-q", "interlinq"),
+      )
+      print(f"Wrote {csv_file_path}")

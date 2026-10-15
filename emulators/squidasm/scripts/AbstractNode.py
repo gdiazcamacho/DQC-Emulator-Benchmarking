@@ -11,12 +11,27 @@ from squidasm.sim.stack.common import LogManager
 from squidasm.sim.stack.program import Program, ProgramContext, ProgramMeta
 
 
-def CRz(control: Qubit, target: Qubit, angle: float = np.pi):
-    """ Controlled Z rotation gate
+def CP(control: Qubit, target: Qubit, angle: float = np.pi):
+    """Controlled-PHASE gate, CP(a) = diag(1, 1, 1, e^{i a}).
+
+    Despite the historical name `CRz` (kept below as an alias), this sequence
+    implements controlled-PHASE, not controlled-Rz. The leading
+    `control.rot_Z(angle/2)` is exactly the control-local correction that turns
+    CRz into CP:
+
+        CP(a) = CRz(a) . P_control(a/2)
+
+    This matters because CP is the gate the inverse QFT is actually built from,
+    and because the `angle < 0` branch below is only valid for CP: CP is
+    2*pi-periodic in the angle, whereas Rz is 4*pi-periodic, so the same
+    wraparound applied to a true CRz would flip its sign.
+
+    Verified against exact unitaries in tests/test_primitives.py.
 
     Parameters:
     - control: qubit
     - target: qubit
+    - angle: rotation angle in radians
     """
 
     if angle < 0:
@@ -28,6 +43,11 @@ def CRz(control: Qubit, target: Qubit, angle: float = np.pi):
     # target.rot_Z(angle=-angle/2)
     control.cnot(target)
     target.rot_Z(angle=angle/2)
+
+
+# Backwards-compatible alias. The name is a misnomer (see CP above); prefer CP
+# in new code.
+CRz = CP
 
 
 def SWAP(qubit_1: Qubit, qubit_2: Qubit):
@@ -605,8 +625,8 @@ class AbstractNode(Program):
 
             for j in range(0, i):
                 if verbose:
-                    print(f"{self.name}: CRz({i}, {j}, θ = π/{2**(i-j)})")
-                CRz(qubits[i], qubits[j], angle= np.pi/(2**(i-j)))
+                    print(f"{self.name}: CP({i}, {j}, θ = π/{2**(i-j)})")
+                CP(qubits[i], qubits[j], angle= np.pi/(2**(i-j)))
 
             # Apply H per layer
             if verbose:
@@ -637,8 +657,8 @@ class AbstractNode(Program):
 
             for j in range(i-1, -1, -1):
                 if verbose:
-                    print(f"{self.name}: CRz({i}, {j}, θ = -π/{(2**((i-j)))})")
-                CRz(qubits[i], qubits[j], angle= -np.pi/(2**((i-j))))
+                    print(f"{self.name}: CP({i}, {j}, θ = -π/{(2**((i-j)))})")
+                CP(qubits[i], qubits[j], angle= -np.pi/(2**((i-j))))
 
         # Final H
         if verbose:
@@ -695,7 +715,7 @@ class AbstractNode(Program):
 
             for j, qubit in enumerate(qubits):
                 if verbose:
-                    print(f"{self.name}: CRz({i+num_own_qubits}, {j}, θ = -π/{2**(i+num_own_qubits-j)})")
-                CRz(epr, qubit, angle=-np.pi/2**(i+num_own_qubits-j))
+                    print(f"{self.name}: CP({i+num_own_qubits}, {j}, θ = -π/{2**(i+num_own_qubits-j)})")
+                CP(epr, qubit, angle=-np.pi/2**(i+num_own_qubits-j))
 
             yield from self.cat_disentangle_target(epr, peer)
