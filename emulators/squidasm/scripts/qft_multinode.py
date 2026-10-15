@@ -35,10 +35,36 @@ import yaml
 
 ####################################################
 
+def make_noiseless(config_yaml):
+    """Zero every noise source of a network config IN PLACE, keeping its
+    topology, link/clink types and timings.
+
+    --noise none used to load config-QFT-noiseless.yaml, whose `perfect` link
+    type the installed netsquid_netbuilder cannot route ("Could not calculate a
+    shortest route", seen on QMIO 2026-10-14). Deriving the noiseless network
+    from the same template as --noise device means the two settings differ
+    ONLY in noise parameters:
+      * gate depolarising probabilities -> 0
+      * T1 = T2 = 0  (SquidASM generic qdevice: 0 disables decoherence)
+      * link EPR fidelity -> 1 (depolarise link; t_cycle/prob_success kept)
+    """
+    for stack in config_yaml["stacks"]:
+        q = stack["qdevice_cfg"]
+        q["single_qubit_gate_depolar_prob"] = 0.0
+        q["two_qubit_gate_depolar_prob"] = 0.0
+        q["T1"] = 0
+        q["T2"] = 0
+    for link in config_yaml["links"]:
+        if "fidelity" in link.get("cfg", {}):
+            link["cfg"]["fidelity"] = 1.0
+    return config_yaml
+
+
 def setup_network_yaml(
         network_structure: dict,
         config_template: str = "config_template.yaml",
-        temp_config_file: str = ".config_file.yaml"):
+        temp_config_file: str = ".config_file.yaml",
+        noiseless: bool = False):
 
     node_names, node_qubits = list(zip(*network_structure.items()))
     num_nodes = len(node_qubits)
@@ -49,6 +75,8 @@ def setup_network_yaml(
             config_yaml = (yaml.safe_load(stream)).copy()
         except yaml.YAMLError as exc:
             print(exc)
+    if noiseless:
+        make_noiseless(config_yaml)
 
     # Copy default config from template
     stack0 = config_yaml["stacks"][0].copy()
@@ -337,6 +365,7 @@ def run_DQFT(
         verbose=False,
         delete_temp_file=True,
         comm_mode="packed",
+        noiseless=False,
     ):
 
     network_structure = {node: nq for node, nq in zip(node_names, node_qubits)}
@@ -346,7 +375,8 @@ def run_DQFT(
     cfg  = setup_network_yaml(
         network_structure=network_structure,
         config_template=config_template,
-        temp_config_file = temp_config_file
+        temp_config_file=temp_config_file,
+        noiseless=noiseless,
         )
 
     # Create program for each node
@@ -367,9 +397,11 @@ def run_DQFT(
     out = run(config=cfg, programs=programs, num_times=shots)
 
     # Delete temporary yaml
-    if delete_temp_file:
-        if os.path.exists(".config_file.yaml"):
-            os.remove(".config_file.yaml")
+    # Remove the per-run network config. (This used to delete
+    # ".config_file.yaml", a name nothing writes, so every run left a
+    # "<timestamp>-config.yaml" behind: one file per job in a campaign.)
+    if delete_temp_file and os.path.exists(temp_config_file):
+        os.remove(temp_config_file)
 
     return out
 
@@ -391,20 +423,20 @@ if __name__ == "__main__":
                              "classical sockets only, zero EPR pairs.")
     parser.add_argument('--noise', type=str, default='none',
                         choices=['none', 'device'],
-                        help="'none': config-QFT-noiseless.yaml (perfect links, "
-                             "no depolarising, no decoherence). 'device': "
-                             "config_template.yaml (1%% / 10%% gate "
-                             "depolarising, link fidelity 0.9, T1/T2).")
+                        help="'device': config_template.yaml (1%% / 10%% gate "
+                             "depolarising, link fidelity 0.9, finite T1/T2). "
+                             "'none': the same network with every noise "
+                             "parameter zeroed (make_noiseless).")
     
     # Parse the arguments
     args = parser.parse_args()
     
     emulator = "squidasm"
     verbose = False
-    config_template = {
-        "none": '../scripts/config-QFT-noiseless.yaml',
-        "device": '../scripts/config_template.yaml',
-    }[args.noise]
+    # One network template for both settings; --noise none zeroes its noise
+    # parameters (make_noiseless), so the two differ only in noise.
+    config_template = '../scripts/config_template.yaml'
+    noiseless = (args.noise == "none")
     num_qubits = args.num_qubits
     num_nodes = args.num_nodes
     theta = args.theta
@@ -415,7 +447,7 @@ if __name__ == "__main__":
     # node_names = ["Alice", "Bob", "Charlie", "David"]
     
     verbose = False  # Bool
-    delete_temp_file = False  # Bool
+    delete_temp_file = True   # Bool
     
     tracemalloc.start(); start_time = time.time()  # Start memory profiling and record the start time
     
@@ -429,6 +461,7 @@ if __name__ == "__main__":
       verbose=verbose,
       delete_temp_file=delete_temp_file,
       comm_mode=args.comm_mode,
+      noiseless=noiseless,
       )
     
     execution_time = time.time() - start_time  # Calculate execution time

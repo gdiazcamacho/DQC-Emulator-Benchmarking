@@ -107,7 +107,7 @@ conditioned phases, zero e-bits) and Interlin-q's own `native` partitioning.
 | Emulator | Comm modes | Noise models | Notes |
 |---|---|---|---|
 | Qiskit Aer | basic, packed, dynamic | none, depolarizing | Monolithic reference; models no network |
-| SquidASM | packed, dynamic | none (`config-QFT-noiseless.yaml`), device (`config_template.yaml`) | NetSquid-based; `dynamic` validated offline with a mock harness only |
+| SquidASM | packed, dynamic | device (`config_template.yaml`), none (same network, noise zeroed) | NetSquid-based; `dynamic` validated offline with a mock harness only |
 | SQUANCH | basic, packed, dynamic | none | Quantum modes simulate one dense density matrix (`n + 2*nodes` qubits): capped at 10 qubits |
 | CUNQA 3.1.0 | basic, packed, dynamic | none | Built from source (`emulators/cunqa/env/`); quantum modes capped at 4 nodes; memory column = driver only |
 | Interlin-q | native | none | `num_qubits` must be divisible by `num_nodes` |

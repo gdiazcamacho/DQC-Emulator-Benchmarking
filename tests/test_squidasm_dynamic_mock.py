@@ -212,3 +212,26 @@ def test_statistics_match_ideal(sq):
 def test_dynamic_uses_no_epr(sq):
     assert sq.expected_ebits([3, 3, 2], "dynamic") == 0
     assert sq.expected_ebits([3, 3, 2], "packed") == 3 * 1 + 2 * 2
+
+
+def test_noiseless_network_zeroes_every_noise_source(sq):
+    """--noise none is the device network with noise zeroed, nothing else."""
+    import copy
+    with open(os.path.join(SQ, "config_template.yaml")) as fh:
+        noisy = yaml_mod().safe_load(fh)
+    clean = sq.make_noiseless(copy.deepcopy(noisy))
+    for st in clean["stacks"]:
+        q = st["qdevice_cfg"]
+        assert q["single_qubit_gate_depolar_prob"] == 0
+        assert q["two_qubit_gate_depolar_prob"] == 0
+        assert q["T1"] == 0 and q["T2"] == 0
+    for ln in clean["links"]:
+        assert ln["cfg"]["fidelity"] == 1.0
+        assert ln["typ"] == next(l["typ"] for l in noisy["links"])  # same routing
+    assert len(clean["stacks"]) == len(noisy["stacks"])
+    assert clean["clinks"] == noisy["clinks"]
+
+
+def yaml_mod():
+    import yaml
+    return yaml

@@ -41,6 +41,19 @@ Everything needed to produce the paper's results as one traceable campaign
   matrix, plan consistency, baseline), tests/test_squidasm_dynamic_mock.py.
 
 ### Fixed
+- **Interlin-q: every multi-node result was wrong (state preparation).**
+  `fourier_state` advanced the global qubit offset by `len(q_id)` -- the
+  length of the last qubit's id STRING ("q_0_1" -> 5) -- instead of the
+  node's qubit count, so every node after the first got wrong rotation
+  angles. Single-node runs were unaffected. QMIO, 4 qubits / 2 nodes, exact
+  theta = 3/16: fidelity 0.04 before, 1.0 after (also 1.0 at 6q/3n and 8q/2n,
+  checked locally). The published "Interlin-q degrades with size and node
+  count" result must be re-derived from campaign-v1 data.
+- **SquidASM left a `<timestamp>-config.yaml` behind on every run** (its
+  cleanup deleted a different file name); now removed after the run.
+- **Interlin-q: bitstring order for >= 11 qubits per host.** Results were
+  assembled with `sorted(all_bits)`, a string sort ('q_0_10' < 'q_0_2');
+  now in q_map order.
 - **Interlin-q: every sweep job failed.** The template passed `--comm_mode`,
   which the script did not accept. It now takes `--comm_mode native` and
   `--noise none` and records both (rows were labelled `packed` and
@@ -51,9 +64,12 @@ Everything needed to produce the paper's results as one traceable campaign
 - **SquidASM noise was undocumented and unlabelled.** `config_template.yaml`
   was headed "Perfect ... no noise" but sets 1%/10% gate depolarising, link
   fidelity 0.9 and finite T1/T2, and was used for every run; rows were
-  labelled by the writer's default. Now `--noise none` uses
-  `config-QFT-noiseless.yaml` and `--noise device` the noisy template, whose
-  header now says what it is. Check which one the EuroQHPC numbers used.
+  labelled by the writer's default. Now `--noise device` uses the template
+  (header corrected) and `--noise none` the SAME network with every noise
+  parameter zeroed (`make_noiseless`: depolarising 0, T1 = T2 = 0, link
+  fidelity 1). `config-QFT-noiseless.yaml` is not used: its `perfect` link
+  type fails routing in the installed netsquid_netbuilder ("Could not
+  calculate a shortest route", QMIO 2026-10-14). Check which one the EuroQHPC numbers used.
 - SQUANCH rows wrote `noise="none"` correctly but SQUANCH quantum modes were
   unbounded in the sweep; at 100 shots a 10-qubit density matrix takes ~45
   min (measured), 12 qubits ~30 h (extrapolated), so they are capped.

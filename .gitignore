@@ -17,6 +17,7 @@ emulators/*/jobs/*.out
 emulators/*/jobs/*.err
 # SquidASM also writes timestamp-named network configs into jobs/ at runtime
 emulators/squidasm/jobs/*-config.yaml
+emulators/squidasm/scripts/*-config.yaml
 # Stray swap files
 emulators/*/jobs/*.swp
 

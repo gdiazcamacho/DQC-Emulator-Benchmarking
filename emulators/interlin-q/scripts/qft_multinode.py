@@ -73,7 +73,7 @@ def fourier_state(q_map, theta, layers, verbose=False):
             if verbose:
                 print(op.gate, op.qids, op.gate_param)  
             ops.append(op)
-        offset += len(q_id) # Add node qubits to the offset for the next node
+        offset += len(q_map[node])  # was len(q_id): length of the id STRING ("q_0_1" -> 5)
     layers.append(Layer(ops))
     
     return layers
@@ -248,7 +248,11 @@ def controller_host_protocol(host, q_map, theta, result_container, verbose=False
                 print("\nThe estimated value of the phase is {0}".format(phase))
 
             # Store result (e.g., '000111' or similar)
-    bitstring = ''.join(str(all_bits[q]) for q in sorted(all_bits.keys()))
+    # Global qubit order = q_map order (node by node, then local index). The
+    # previous sorted(all_bits) compared id STRINGS, so with >= 11 qubits per
+    # host 'q_0_10' sorted before 'q_0_2' and scrambled the bitstring.
+    bitstring = ''.join(str(all_bits[q]) for node in computing_host_ids
+                        for q in q_map[node])
     result_container.append(bitstring)  # Mutates shared list
 
 def computing_host_protocol(host, verbose=False):
